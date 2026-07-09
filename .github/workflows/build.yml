@@ -36,7 +36,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: 'go.sum'
 
       - name: Download dependensi
         run: go mod download
@@ -98,4 +100,4 @@ jobs:
           draft: false
           prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.BOT_KOMETIKA }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
