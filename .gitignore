@@ -1,0 +1,26 @@
+# Binary hasil build
+kometika_bot
+tmp/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# File log
+*.log
+mybot.log
+
+# KRITICAL: Session / Token / Credential
+session.json
+*.session
+*.creds
+.env
+
+# File cache dan temporary lainnya
+*.cache
+
+# Go build artifacts
+*.test
+*.out
+coverage.out
+vendor/

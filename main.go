@@ -1,0 +1,754 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"mybot/internal/api"
+	"mybot/internal/cache"
+	"mybot/internal/commands"
+	"mybot/internal/config"
+	"mybot/internal/log"
+	"mybot/internal/media"
+
+	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/message"
+	"github.com/gotd/td/telegram/message/html"
+	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
+	"github.com/joho/godotenv"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+var (
+	logger   *zap.Logger
+	jobQueue chan func()
+)
+
+const (
+	maxWorkers   = 100
+	jobQueueSize = 1000
+)
+
+func initLogger() {
+	file, err := os.OpenFile("mybot.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		panic(err)
+	}
+	writeSyncer := zapcore.AddSync(file)
+
+	encoderCfg := zap.NewProductionEncoderConfig()
+	encoderCfg.TimeKey = "time"
+	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	encoder := zapcore.NewJSONEncoder(encoderCfg)
+	core := zapcore.NewCore(encoder, writeSyncer, zapcore.DebugLevel)
+
+	logger = zap.New(core)
+	zap.ReplaceGlobals(logger)
+}
+
+// [TAMBAH] Fungsi startWorkerPool
+func startWorkerPool(ctx context.Context, wg *sync.WaitGroup) {
+	for i := range maxWorkers {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for {
+				select {
+				case job := <-jobQueue:
+					if job == nil {
+						return
+					}
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								logger.Error("Worker panic", zap.Int("worker", workerID), zap.Any("recover", r))
+							}
+						}()
+						job()
+					}()
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(i)
+	}
+	logger.Info("Worker pool started", zap.Int("workers", maxWorkers), zap.Int("queue_size", jobQueueSize))
+}
+
+// [TAMBAH] Fungsi enqueueJob
+func enqueueJob(job func()) {
+	select {
+	case jobQueue <- job:
+	default:
+		logger.Warn("Job queue full, dropping task")
+	}
+}
+
+func getUserIDFromMsg(msg *tg.Message) int64 {
+	if peer, ok := msg.PeerID.(*tg.PeerUser); ok {
+		return peer.UserID
+	}
+	return 0
+}
+
+func handleAutoDownload(ctx context.Context, text string, tgClient *tg.Client, msg *tg.Message, entities tg.Entities) {
+	_ = ctx
+	switch {
+	case config.IsPlatformURL(text, "tiktok"):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleTikTok(bgCtx, tgClient, msg, entities, text, logger); err != nil {
+				logger.Error("Auto TikTok error", zap.Error(err))
+				log.LogError(bgCtx, "HandleTikTok", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
+	case config.IsPlatformURL(text, "instagram"):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleInstagram(bgCtx, tgClient, msg, entities, text, logger); err != nil {
+				logger.Error("Auto Instagram error", zap.Error(err))
+				log.LogError(bgCtx, "HandleInstagram", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
+	case config.IsPlatformURL(text, "facebook"):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleFacebook(bgCtx, tgClient, msg, entities, text, logger); err != nil {
+				logger.Error("Auto Facebook error", zap.Error(err))
+				log.LogError(bgCtx, "HandleFacebook", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
+	case config.IsPlatformURL(text, "lulustream"):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleLulustream(bgCtx, tgClient, msg, entities, text, logger); err != nil {
+				logger.Error("Auto Lulustream error", zap.Error(err))
+				log.LogError(bgCtx, "HandleLulustream", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
+	case config.IsTeraboxLink(text):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleTerabox(bgCtx, tgClient, msg, entities, text); err != nil {
+				logger.Error("Auto Terabox error", zap.Error(err))
+				log.LogError(bgCtx, "HandleTerabox", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
+	case config.IsPlatformURL(text, "mediafire"):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleMediaFire(bgCtx, tgClient, msg, entities, text, logger); err != nil {
+				logger.Error("Auto MediaFire error", zap.Error(err))
+				log.LogError(bgCtx, "HandleMediaFire", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
+	case config.IsPlatformURL(text, "aceimg"):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleAceImg(bgCtx, tgClient, msg, entities, text, logger); err != nil {
+				logger.Error("Auto AceImg error", zap.Error(err))
+				log.LogError(bgCtx, "HandleAceImg", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
+	} // batasan
+}
+
+func getUserFromMessage(ctx context.Context, tgClient *tg.Client, msg *tg.Message, entities tg.Entities) *tg.User {
+	// 1. Coba dari FromID (pengirim pesan)
+	if msg.FromID != nil {
+		switch peer := msg.FromID.(type) {
+		case *tg.PeerUser:
+			if u, exists := entities.Users[peer.UserID]; exists {
+				return u
+			}
+			users, err := tgClient.UsersGetUsers(ctx, []tg.InputUserClass{&tg.InputUser{UserID: peer.UserID}})
+			if err == nil && len(users) > 0 {
+				if u, ok := users[0].(*tg.User); ok {
+					return u
+				}
+			}
+			// Fallback: buat user minimal agar pengecekan ID bisa jalan
+			return &tg.User{ID: peer.UserID}
+		}
+	}
+
+	// 2. Fallback ke PeerID (untuk private chat)
+	switch peer := msg.PeerID.(type) {
+	case *tg.PeerUser:
+		if u, exists := entities.Users[peer.UserID]; exists {
+			return u
+		}
+		users, err := tgClient.UsersGetUsers(ctx, []tg.InputUserClass{&tg.InputUser{UserID: peer.UserID}})
+		if err == nil && len(users) > 0 {
+			if u, ok := users[0].(*tg.User); ok {
+				return u
+			}
+		}
+		return &tg.User{ID: peer.UserID}
+	}
+	return nil
+}
+
+// [TAMBAH] Fungsi logUserAction
+func logUserAction(user *tg.User, action, text string) {
+	if user == nil || action == "" {
+		return
+	}
+	username := user.Username
+	if username == "" {
+		username = user.FirstName
+	}
+	logger.Info("User action",
+		zap.String("username", "@"+username),
+		zap.Int64("user_id", user.ID),
+		zap.String("action", action),
+		zap.String("message", text),
+	)
+}
+
+// [TAMBAH] Fungsi handleCommand (baru)
+func handleCommand(ctx context.Context, tgClient *tg.Client, msg *tg.Message, entities tg.Entities, user *tg.User, rootID int64, text string) error {
+	var cmd string
+	var args []string
+	found := false
+	for _, prefix := range []string{"/", ".", "!", "#"} {
+		if rest, ok := strings.CutPrefix(text, prefix); ok {
+			parts := strings.Fields(rest)
+			if len(parts) > 0 {
+				cmd = strings.ToLower(parts[0])
+				args = parts[1:]
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		return nil
+	}
+	logUserAction(user, cmd, text)
+
+	switch cmd {
+	case "dl":
+		if len(args) < 1 {
+			return nil
+		}
+		url := args[0]
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleGroupDL(bgCtx, tgClient, msg, entities, url, logger); err != nil {
+				logger.Error("HandleGroupDL error", zap.Error(err))
+			}
+		})
+		return nil
+
+	case "gdn":
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleGDNCommand(bgCtx, tgClient, msg, entities, logger); err != nil {
+				logger.Error("HandleGDNCommand error", zap.Error(err))
+			}
+		})
+		return nil
+
+	case "goroutine":
+		if _, isPrivate := msg.PeerID.(*tg.PeerUser); !isPrivate {
+			peer, _ := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+			if peer != nil {
+				sender := message.NewSender(tgClient)
+				_, _ = sender.To(peer).Reply(msg.ID).Text(ctx, "❌ Command ini hanya dapat digunakan di Private Chat (DM) dengan bot.")
+			}
+			return nil
+		}
+		if user == nil || user.ID != rootID {
+			denyPeer, _ := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+			if denyPeer != nil {
+				sender := message.NewSender(tgClient)
+				_, _ = sender.To(denyPeer).Reply(msg.ID).Text(ctx, "❌ Akses Ditolak.\nHanya Root Admin yang diizinkan menggunakan fitur ini.")
+			}
+			return nil
+		}
+		return commands.HandleGoroutine(ctx, tgClient, msg, entities, logger)
+	case "ping":
+		peer, err := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+		if err != nil {
+			return nil
+		}
+		sender := message.NewSender(tgClient)
+		_, _ = sender.To(peer).Reply(msg.ID).Text(ctx, "Pong!")
+		return nil
+	case "uptime":
+		if user == nil || user.ID != rootID {
+			denyPeer, _ := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+			if denyPeer != nil {
+				sender := message.NewSender(tgClient)
+				_, _ = sender.To(denyPeer).Reply(msg.ID).Text(ctx, "❌ Akses Ditolak.\nHanya Root Admin yang diizinkan menggunakan fitur pemantauan server.")
+			}
+			return nil
+		}
+		infoMsg, err := api.GetSystemInfo()
+		if err != nil {
+			logger.Warn("Gagal mengambil system info", zap.Error(err))
+			infoMsg = "⚠️ Gagal mengambil informasi sistem."
+		}
+		peer, err := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+		if err != nil {
+			return err
+		}
+		sender := message.NewSender(tgClient)
+		_, err = sender.To(peer).Reply(msg.ID).StyledText(ctx, html.String(nil, infoMsg))
+		if err != nil {
+			_, _ = sender.To(peer).Reply(msg.ID).Text(ctx, infoMsg)
+		}
+		return nil
+	case "vnstat":
+		if user == nil || user.ID != rootID {
+			denyPeer, _ := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+			if denyPeer != nil {
+				sender := message.NewSender(tgClient)
+				_, _ = sender.To(denyPeer).Reply(msg.ID).Text(ctx, "❌ Akses Ditolak.\nHanya Root Admin yang diizinkan menggunakan fitur pemantauan server.")
+			}
+			return nil
+		}
+		enqueueJob(func() {
+			if err := commands.HandleVnstat(ctx, tgClient, msg, entities, logger); err != nil {
+				logger.Error("Gagal menjalankan command vnstat", zap.Error(err))
+			}
+		})
+		return nil
+	case "speedtest":
+		if user == nil || user.ID != rootID {
+			denyPeer, _ := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+			if denyPeer != nil {
+				sender := message.NewSender(tgClient)
+				_, _ = sender.To(denyPeer).Reply(msg.ID).Text(ctx, "❌ Akses Ditolak.\nHanya Root Admin yang diizinkan menggunakan fitur ini.")
+			}
+			return nil
+		}
+		enqueueJob(func() {
+			if err := commands.HandleSpeedtest(ctx, tgClient, msg, entities, logger); err != nil {
+				logger.Error("Gagal menjalankan command speedtest", zap.Error(err))
+			}
+		})
+		return nil
+	case "start":
+		enqueueJob(func() {
+			if err := commands.HandleStart(ctx, tgClient, msg, entities, user, logger); err != nil {
+				logger.Error("HandleStart error", zap.Error(err))
+			}
+		})
+		return nil
+	case "getid", "groupinfo":
+		// ============ CEK AKSES ROOT ============
+		if user == nil || user.ID != rootID {
+			denyPeer, _ := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+			if denyPeer != nil {
+				sender := message.NewSender(tgClient)
+				_, _ = sender.To(denyPeer).Reply(msg.ID).Text(ctx,
+					"❌ Akses Ditolak.\nHanya Root Admin yang diizinkan menggunakan fitur ini.")
+			}
+			return nil
+		}
+
+		// ============ AMBIL PEER ============
+		peer, err := commands.GetPeerFromMessage(ctx, tgClient, msg, entities)
+		if err != nil {
+			return nil
+		}
+
+		// ============ BANGUN INFORMASI ============
+		var info string
+		switch p := msg.PeerID.(type) {
+		case *tg.PeerUser:
+			// Ambil data user dari entities (atau langsung dari p)
+			userData, ok := entities.Users[p.UserID]
+			if !ok {
+				info = "❌ Data user tidak ditemukan."
+				break
+			}
+			username := userData.Username
+			if username == "" {
+				username = "-"
+			}
+			firstName := userData.FirstName
+			if firstName == "" {
+				firstName = "-"
+			}
+			info = fmt.Sprintf(
+				"<b>👤 User Info</b>\n\n"+
+					"├ <b>ID</b>        : <code>%d</code>\n"+
+					"├ <b>Access Hash</b>: <code>%d</code>\n"+
+					"├ <b>Username</b>  : <code>%s</code>\n"+
+					"└ <b>First Name</b>: <code>%s</code>",
+				userData.ID, userData.AccessHash, username, firstName,
+			)
+
+		case *tg.PeerChat:
+			info = fmt.Sprintf(
+				"<b>👥 Group Info</b>\n\n"+
+					"├ <b>Chat ID</b>: <code>%d</code>\n"+
+					"└ <b>Type</b>    : Basic Group",
+				p.ChatID,
+			)
+
+		case *tg.PeerChannel:
+			ch, ok := entities.Channels[p.ChannelID]
+			if !ok {
+				info = "❌ Data channel tidak ditemukan."
+				break
+			}
+			username := ch.Username
+			if username == "" {
+				username = "-"
+			}
+			info = fmt.Sprintf(
+				"<b>📢 Channel/Supergroup Info</b>\n\n"+
+					"├ <b>ID</b>          : <code>%d</code>\n"+
+					"├ <b>Display ID</b>  : <code>-100%d</code>\n"+
+					"├ <b>Access Hash</b> : <code>%d</code>\n"+
+					"├ <b>Title</b>       : <code>%s</code>\n"+
+					"└ <b>Username</b>    : <code>%s</code>",
+				ch.ID, ch.ID, ch.AccessHash, ch.Title, username,
+			)
+		}
+
+		// ============ KIRIM PESAN ============
+		sender := message.NewSender(tgClient)
+		_, _ = sender.To(peer).Reply(msg.ID).StyledText(ctx, html.String(nil, info))
+		return nil
+	}
+	return nil
+}
+
+// ==================== MAIN ====================
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	_ = godotenv.Load()
+
+	initLogger()
+	defer logger.Sync()
+
+	jobQueue = make(chan func(), jobQueueSize)
+	var wg sync.WaitGroup
+	startWorkerPool(ctx, &wg)
+
+	apiID, _ := strconv.Atoi(os.Getenv("TELEGRAM_API_ID"))
+	apiHash := os.Getenv("TELEGRAM_API_HASH")
+	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	botUsername := os.Getenv("TELEGRAM_BOT_USERNAME")
+	if botUsername == "" {
+		logger.Warn("TELEGRAM_BOT_USERNAME belum diset di .env")
+	}
+
+	rootIDStr := os.Getenv("TELEGRAM_ROOT_ID")
+	var rootID int64 = 0
+	if rootIDStr != "" {
+		var err error
+		rootID, err = strconv.ParseInt(rootIDStr, 10, 64)
+		if err != nil {
+			logger.Warn("Invalid TELEGRAM_ROOT_ID", zap.Error(err))
+		}
+	}
+
+	// ============ BUAT CLIENT ============
+	dispatcher := tg.NewUpdateDispatcher()
+	client := telegram.NewClient(apiID, apiHash, telegram.Options{
+		UpdateHandler:  dispatcher,
+		SessionStorage: &session.FileStorage{Path: "session.json"},
+	})
+
+	// ============ REGISTER HANDLER ============
+	dispatcher.OnNewMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewMessage) error {
+		return handleMessage(ctx, client.API(), update.Message, entities, rootID, botUsername)
+	})
+	dispatcher.OnNewChannelMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
+		return handleMessage(ctx, client.API(), update.Message, entities, rootID, botUsername)
+	})
+	dispatcher.OnBotCallbackQuery(func(ctx context.Context, entities tg.Entities, update *tg.UpdateBotCallbackQuery) error {
+		return handleCallbackQuery(ctx, client.API(), update, logger)
+	})
+
+	dispatcher.OnBotNewBusinessMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateBotNewBusinessMessage) error {
+		return commands.BusinessMessageHandler(ctx, client.API(), update, entities, logger)
+	})
+
+	dispatcher.OnBotBusinessConnect(func(ctx context.Context, entities tg.Entities, update *tg.UpdateBotBusinessConnect) error {
+		conn := update.Connection
+		logger.Info("🔔 OnBotBusinessConnect called",
+			zap.String("conn_id", conn.ConnectionID),
+			zap.Bool("disabled", conn.Disabled),
+		)
+		if conn.Disabled {
+			commands.RemoveBusinessState(conn.ConnectionID)
+			logger.Info("Business connection disabled", zap.String("conn_id", conn.ConnectionID))
+			return nil
+		}
+		rights, _ := conn.GetRights()
+		state := &commands.BusinessState{
+			ConnectionID: conn.ConnectionID,
+			DCID:         conn.DCID,
+			Rights:       &rights,
+			UserID:       conn.UserID,
+		}
+		commands.SetBusinessState(conn.ConnectionID, state)
+		logger.Info("✅ Business state saved",
+			zap.String("conn_id", conn.ConnectionID),
+			zap.Bool("can_reply", rights.Reply),
+		)
+		return nil
+	})
+	// ============ RUN CLIENT ============
+	err := client.Run(ctx, func(ctx context.Context) error {
+		status, err := client.Auth().Status(ctx)
+		if err != nil {
+			return err
+		}
+		if !status.Authorized {
+			for {
+				_, authErr := client.Auth().Bot(ctx, botToken)
+				if authErr == nil {
+					break
+				}
+				if d, ok := tgerr.AsFloodWait(authErr); ok {
+					logger.Warn("Auth FLOOD_WAIT, menunggu...", zap.Duration("wait", d))
+					select {
+					case <-time.After(d + time.Second):
+						continue
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return authErr
+			}
+		}
+
+		// ============ INISIALISASI LOG GROUP ============
+		logGroupIDStr := os.Getenv("GROUP_ID")
+		if logGroupIDStr != "" {
+			logGroupID, err := strconv.ParseInt(logGroupIDStr, 10, 64)
+			if err == nil {
+				logPeer, err := getLogPeer(logGroupID)
+				if err != nil {
+					logger.Warn("Gagal dapatkan peer log group", zap.Error(err))
+				} else {
+					log.InitLogger(logPeer, client.API(), logger)
+					log.LogInfo(ctx, "✅ Bot started successfully")
+				}
+			}
+		}
+
+		logger.Info("Bot running")
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	cancel()
+	wg.Wait()
+	logger.Info("Bot shutdown gracefully")
+
+	if err != nil {
+		logger.Fatal("Client run error", zap.Error(err))
+	}
+}
+
+func getLogPeer(chatID int64) (tg.InputPeerClass, error) {
+	if chatID > 0 {
+		return &tg.InputPeerChat{ChatID: chatID}, nil
+	}
+
+	accessHashStr := os.Getenv("GROUP_HASH")
+	if accessHashStr == "" {
+		return nil, fmt.Errorf("GROUP_HASH tidak diset di .env")
+	}
+	accessHash, err := strconv.ParseInt(accessHashStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("GROUP_HASH tidak valid: %w", err)
+	}
+
+	const zeroChannelID int64 = -1_000_000_000_000
+	channelID := -(chatID - zeroChannelID)
+
+	return &tg.InputPeerChannel{ChannelID: channelID, AccessHash: accessHash}, nil
+}
+
+// ==================== HANDLER MESSAGE ====================
+
+func handleMessage(ctx context.Context, tgClient *tg.Client, msgClass tg.MessageClass, entities tg.Entities, rootID int64, botUsername string) error {
+	msg, ok := msgClass.(*tg.Message)
+	if !ok || msg.Message == "" {
+		return nil
+	}
+	text := msg.Message
+
+	isCommand := false
+	for _, prefix := range []string{"/", ".", "!", "#"} {
+		if strings.HasPrefix(text, prefix) {
+			isCommand = true
+			break
+		}
+	}
+
+	isBotMention := false
+	for _, entity := range msg.Entities {
+		if mention, ok := entity.(*tg.MessageEntityMention); ok {
+			if mention.Offset+mention.Length <= len(text) {
+				mentionedText := text[mention.Offset : mention.Offset+mention.Length]
+				targetUsername := botUsername
+				if !strings.HasPrefix(targetUsername, "@") {
+					targetUsername = "@" + targetUsername
+				}
+				if strings.EqualFold(mentionedText, targetUsername) {
+					isBotMention = true
+					break
+				}
+			}
+		}
+	}
+	_, isPrivate := msg.PeerID.(*tg.PeerUser)
+
+	if !isCommand && isPrivate {
+		handleAutoDownload(ctx, text, tgClient, msg, entities)
+		return nil
+	}
+
+	user := getUserFromMessage(ctx, tgClient, msg, entities)
+	if isCommand {
+		return handleCommand(ctx, tgClient, msg, entities, user, rootID, text)
+	}
+	if isBotMention {
+		handleAutoDownload(ctx, text, tgClient, msg, entities)
+		return nil
+	}
+	return nil
+}
+
+// ==================== HANDLER CALLBACK ====================
+
+func handleCallbackQuery(ctx context.Context, tgClient *tg.Client, query *tg.UpdateBotCallbackQuery, logger *zap.Logger) error {
+	data := query.Data
+
+	if bytes.HasPrefix(data, []byte("tb_")) {
+		peer, err := getPeerFromCallback(ctx, tgClient, query)
+		if err != nil {
+			logger.Error("Gagal dapat peer dari callback Terabox", zap.Error(err))
+			return nil
+		}
+		return commands.HandleTeraboxCallback(context.Background(), tgClient, peer, query.MsgID, query, logger)
+	}
+
+	if !bytes.HasPrefix(data, []byte("mp3_")) {
+		return nil
+	}
+
+	videoID := string(bytes.TrimPrefix(data, []byte("mp3_")))
+	audioURL, title, musicName, ok := cache.GetAudio(videoID)
+	if !ok {
+		answer := &tg.MessagesSetBotCallbackAnswerRequest{
+			QueryID:   query.QueryID,
+			Message:   "❌ Link audio sudah kadaluarsa (2 menit). Silakan minta ulang video TikTok.",
+			CacheTime: 10,
+		}
+		_, _ = tgClient.MessagesSetBotCallbackAnswer(ctx, answer)
+		return nil
+	}
+
+	peer, err := getPeerFromCallback(ctx, tgClient, query)
+	if err != nil {
+		logger.Error("Gagal dapat peer dari callback", zap.Error(err))
+		return nil
+	}
+
+	answer := &tg.MessagesSetBotCallbackAnswerRequest{
+		QueryID:   query.QueryID,
+		Message:   "⏳ Mengunduh audio, mohon tunggu...",
+		CacheTime: 5,
+	}
+	_, _ = tgClient.MessagesSetBotCallbackAnswer(ctx, answer)
+
+	bgCtx := context.Background()
+	stream, _, err := api.GetAudioStream(bgCtx, audioURL)
+	if err != nil {
+		logger.Error("Gagal download audio", zap.Error(err))
+		media.SendTextMessage(ctx, tgClient, peer, "❌ Gagal mengunduh audio.")
+		return nil
+	}
+	defer stream.Close()
+	mediaSender := media.NewMediaSender(tgClient)
+	msgSender := message.NewSender(tgClient)
+
+	filename := fmt.Sprintf("%s.mp3", videoID)
+	caption := fmt.Sprintf("🎵 %s - %s", musicName, title)
+	if len(caption) > 200 {
+		caption = caption[:200]
+	}
+	replyTo := &tg.InputReplyToMessage{
+		ReplyToMsgID: query.MsgID,
+	}
+
+	err = mediaSender.SendAudioStream(bgCtx, peer, stream, filename, title, musicName, caption, nil, replyTo)
+	if err != nil {
+		logger.Error("Gagal kirim audio", zap.Error(err))
+		_, _ = msgSender.To(peer).Text(ctx, "❌ Gagal mengunduh audio.")
+		return nil
+	}
+
+	logger.Info("Audio berhasil dikirim", zap.String("video_id", videoID))
+	return nil
+}
+
+func getPeerFromCallback(ctx context.Context, tgClient *tg.Client, query *tg.UpdateBotCallbackQuery) (tg.InputPeerClass, error) {
+	switch p := query.Peer.(type) {
+	case *tg.PeerUser:
+		users, err := tgClient.UsersGetUsers(ctx, []tg.InputUserClass{
+			&tg.InputUser{UserID: p.UserID},
+		})
+		if err != nil || len(users) == 0 {
+			return nil, err
+		}
+		u := users[0].(*tg.User)
+		return &tg.InputPeerUser{UserID: u.ID, AccessHash: u.AccessHash}, nil
+	case *tg.PeerChat:
+		return &tg.InputPeerChat{ChatID: p.ChatID}, nil
+	case *tg.PeerChannel:
+		ch, err := tgClient.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+			&tg.InputChannel{ChannelID: p.ChannelID},
+		})
+		if err != nil || len(ch.GetChats()) == 0 {
+			return nil, err
+		}
+		c := ch.GetChats()[0].(*tg.Channel)
+		return &tg.InputPeerChannel{ChannelID: c.ID, AccessHash: c.AccessHash}, nil
+	}
+	return nil, nil
+}
