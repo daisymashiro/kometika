@@ -82,9 +82,6 @@ func handleInstagramCommon(
 		logger = zap.NewNop()
 	}
 
-	progressMsgID := sendInstagramLoading(ctx, client, peer, replyTo, logger)
-	defer deleteInstagramLoading(client, progressMsgID, logger)
-
 	logger.Info("Memproses Instagram", zap.String("url", url))
 	log.LogInfo(ctx, "Memproses Instagram\nURL: "+url)
 
@@ -530,69 +527,6 @@ func scheduleInstagramAudioButtonCleanup(
 	}(peer, videoMsgID, videoID)
 }
 
-func sendInstagramLoading(
-	ctx context.Context,
-	client *tg.Client,
-	peer tg.InputPeerClass,
-	replyTo *tg.InputReplyToMessage,
-	logger *zap.Logger,
-) int {
-	req := &tg.MessagesSendMessageRequest{
-		Peer:     peer,
-		Message:  "⏳ Memproses Instagram, mohon tunggu...",
-		RandomID: time.Now().UnixNano(),
-	}
-
-	if replyTo != nil {
-		req.SetReplyTo(replyTo)
-	}
-
-	updates, err := client.MessagesSendMessage(ctx, req)
-	if err != nil {
-		logger.Warn("Gagal kirim pesan loading Instagram", zap.Error(err))
-		log.LogWarn(
-			ctx,
-			"Instagram.LoadingMessage",
-			"Gagal mengirim pesan loading Instagram",
-			"error="+err.Error(),
-		)
-		return 0
-	}
-
-	msgID, err := media.ExtractMessageID(updates)
-	if err != nil {
-		logger.Warn("Gagal extract message ID loading Instagram", zap.Error(err))
-		return 0
-	}
-
-	return msgID
-}
-
-func deleteInstagramLoading(client *tg.Client, progressMsgID int, logger *zap.Logger) {
-	if progressMsgID == 0 {
-		return
-	}
-
-	go func() {
-		time.Sleep(1 * time.Second)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		_, err := client.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
-			Revoke: true,
-			ID:     []int{progressMsgID},
-		})
-		if err != nil {
-			logger.Warn(
-				"Gagal hapus pesan loading Instagram",
-				zap.Int("msg_id", progressMsgID),
-				zap.Error(err),
-			)
-		}
-	}()
-}
-
 func sendInstagramText(
 	ctx context.Context,
 	client *tg.Client,
@@ -680,3 +614,4 @@ func readAllSmall(r interface {
 		}
 	}
 }
+
