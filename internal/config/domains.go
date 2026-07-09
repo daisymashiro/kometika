@@ -67,6 +67,14 @@ var platforms = []PlatformDomain{
 			"aceimg.com",
 		},
 	},
+	{
+		Name: "twitter",
+		Domains: []string{
+			"twitter.com",
+			"x.com",
+			"t.co",
+		},
+	},
 	// Tambahkan platform lain di sini
 }
 

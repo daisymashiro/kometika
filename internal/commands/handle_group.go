@@ -247,6 +247,8 @@ func HandleGroupDL(ctx context.Context, client *tg.Client, msg *tg.Message, enti
 		return handleMediaFireGroup(ctx, client, peer, url, replyTo, logger)
 	case config.IsPlatformURL(url, "aceimg"):
 		return HandleAceImg(ctx, client, msg, entities, url, logger)
+	case config.IsPlatformURL(url, "twitter"):
+		return HandleTwitter(ctx, client, msg, entities, url, logger)
 	default:
 		if err := sendGroupText(ctx, client, peer, "❌ URL tidak dikenali. Platform yang didukung:\n• TikTok\n• Instagram\n• Facebook\n• Lulustream\n• Terabox", replyTo); err != nil {
 			logger.Error("Gagal kirim pesan error", zap.Error(err))

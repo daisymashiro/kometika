@@ -149,6 +149,17 @@ func handleAutoDownload(ctx context.Context, text string, tgClient *tg.Client, m
 				)
 			}
 		})
+	case config.IsPlatformURL(text, "twitter"):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleTwitter(bgCtx, tgClient, msg, entities, text, logger); err != nil {
+				logger.Error("Auto Twitter error", zap.Error(err))
+				log.LogError(bgCtx, "HandleTwitter", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
 	case config.IsTeraboxLink(text):
 		enqueueJob(func() {
 			bgCtx := context.Background()
