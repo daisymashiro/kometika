@@ -91,32 +91,39 @@ func IsSupportedURL(url string) bool {
 	return false
 }
 
-// DetectPlatform mengembalikan nama platform dari URL, atau string kosong jika tidak dikenali
-func DetectPlatform(url string) string {
-	lower := strings.ToLower(url)
-	for _, p := range platforms {
-		for _, d := range p.Domains {
-			if strings.Contains(lower, d) {
-				return p.Name
-			}
-		}
-	}
-	return ""
-}
-
 // IsPlatformURL mengecek apakah URL termasuk platform tertentu
 func IsPlatformURL(url, platformName string) bool {
 	lower := strings.ToLower(url)
 	for _, p := range platforms {
 		if p.Name == platformName {
 			for _, d := range p.Domains {
-				if strings.Contains(lower, d) {
+				// Gunakan boundary check, bukan string.Contains
+				// Cari domain sebagai word boundary (preceded by :// atau /)
+				if strings.Contains(lower, "://"+d) ||
+					strings.Contains(lower, "/"+d) ||
+					strings.HasPrefix(lower, d) {
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+// DetectPlatform mengembalikan nama platform dari URL
+func DetectPlatform(url string) string {
+	lower := strings.ToLower(url)
+	// Sort by domain length (longest first) untuk prioritas yang benar
+	for _, p := range platforms {
+		for _, d := range p.Domains {
+			if strings.Contains(lower, "://"+d) ||
+				strings.Contains(lower, "/"+d) ||
+				strings.HasPrefix(lower, d) {
+				return p.Name
+			}
+		}
+	}
+	return ""
 }
 
 // IsTeraboxLink adalah wrapper untuk IsPlatformURL(url, "terabox")

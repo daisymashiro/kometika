@@ -514,6 +514,10 @@ func main() {
 	dispatcher.OnBotNewBusinessMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateBotNewBusinessMessage) error {
 		return commands.BusinessMessageHandler(ctx, client.API(), update, entities, logger)
 	})
+	//guest mod
+	dispatcher.OnBotGuestChatQuery(func(ctx context.Context, e tg.Entities, upd *tg.UpdateBotGuestChatQuery) error {
+		return commands.HandleBotGuestChatQuery(ctx, client.API(), upd, logger)
+	})
 
 	dispatcher.OnBotBusinessConnect(func(ctx context.Context, entities tg.Entities, update *tg.UpdateBotBusinessConnect) error {
 		conn := update.Connection
@@ -579,6 +583,14 @@ func main() {
 				}
 			}
 		}
+		// inisial group Cache
+		cachePeer, err := getCachePeerFromEnv()
+		if err != nil {
+			logger.Warn("Cache group tidak diset, guest mode akan fallback ke Saved Messages", zap.Error(err))
+		} else {
+			commands.InitGuestMode(cachePeer)
+			logger.Info("Cache group untuk Guest Mode berhasil diinisialisasi")
+		}
 
 		logger.Info("Bot running")
 		<-ctx.Done()
@@ -605,6 +617,40 @@ func getLogPeer(chatID int64) (tg.InputPeerClass, error) {
 	accessHash, err := strconv.ParseInt(accessHashStr, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("GROUP_HASH tidak valid: %w", err)
+	}
+
+	const zeroChannelID int64 = -1_000_000_000_000
+	channelID := -(chatID - zeroChannelID)
+
+	return &tg.InputPeerChannel{ChannelID: channelID, AccessHash: accessHash}, nil
+}
+
+// getCachePeerFromEnv membaca CACHE_GROUP_ID dari .env dan mengembalikan InputPeerClass
+func getCachePeerFromEnv() (tg.InputPeerClass, error) {
+	cacheGroupIDStr := os.Getenv("GROUP_ID")
+	if cacheGroupIDStr == "" {
+		return nil, fmt.Errorf("CACHE_GROUP_ID tidak diset di .env")
+	}
+
+	chatID, err := strconv.ParseInt(cacheGroupIDStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("CACHE_GROUP_ID tidak valid: %w", err)
+	}
+
+	// Basic Group (ID positif)
+	if chatID > 0 {
+		return &tg.InputPeerChat{ChatID: chatID}, nil
+	}
+
+	// Supergroup / Channel (ID negatif, misal -1001234567890)
+	accessHashStr := os.Getenv("GROUP_HASH")
+	if accessHashStr == "" {
+		return nil, fmt.Errorf("CACHE_GROUP_HASH tidak diset di .env untuk Channel/Supergroup")
+	}
+
+	accessHash, err := strconv.ParseInt(accessHashStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("CACHE_GROUP_HASH tidak valid: %w", err)
 	}
 
 	const zeroChannelID int64 = -1_000_000_000_000
