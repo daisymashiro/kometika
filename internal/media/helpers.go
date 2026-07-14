@@ -188,6 +188,7 @@ func (m *MediaSender) SendDynamicStream(
 			if info.MimeType == "video/mp4" {
 				videoAttr.SupportsStreaming = true
 			}
+			videoAttr.Duration = (48 * time.Hour).Seconds()
 			attrs = append(attrs, videoAttr)
 
 		case api.ContentAudio:
@@ -258,3 +259,4 @@ func (m *MediaSender) UploadThumbnail(ctx context.Context, data []byte) (tg.Inpu
 
 	return m.up.FromBytes(ctx, "thumb.jpg", data)
 }
+

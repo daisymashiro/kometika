@@ -83,7 +83,7 @@ func handleInstagramCommon(
 	}
 
 	logger.Info("Memproses Instagram", zap.String("url", url))
-	log.LogInfo(ctx, "Memproses Instagram\nURL: "+url)
+	//log.LogInfo(ctx, "Memproses Instagram\nURL: "+url)
 
 	data, err := instagram.FetchInstagramDataWithFallback(url)
 	if err != nil {
@@ -270,13 +270,7 @@ func sendInstagramVideo(
 		cache.SetAudio(videoID, audioURL, rawTitle, "Instagram Music")
 
 		logger.Info("Audio Instagram disimpan ke cache", zap.String("id", videoID))
-		log.LogInfo(
-			ctx,
-			fmt.Sprintf(
-				"Audio Instagram disimpan ke cache\nID: %s\nSource: Instagram Music",
-				videoID,
-			),
-		)
+		//log.LogInfo(ctx, fmt.Sprintf( "Audio Instagram disimpan ke cache\nID: %s\nSource: Instagram Music", videoID,),)
 	}
 
 	stream, _, err := api.GetVideoStream(ctx, videoURL)
@@ -614,4 +608,3 @@ func readAllSmall(r interface {
 		}
 	}
 }
-

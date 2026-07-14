@@ -2,7 +2,6 @@ package config
 
 import "strings"
 
-// PlatformDomain menyimpan daftar domain untuk satu platform
 type PlatformDomain struct {
 	Name    string   // Nama platform: "tiktok", "instagram", dll.
 	Domains []string // Daftar domain/subdomain yang dikenali
@@ -78,12 +77,23 @@ var platforms = []PlatformDomain{
 	// Tambahkan platform lain di sini
 }
 
+// checkDomainMatch adalah fungsi sentral untuk menghindari false-positive (seperti terabox.com terbaca x.com)
+// dan tetap mendeteksi subdomain (seperti www.instagram.com atau m.facebook.com)
+func checkDomainMatch(url, domain string) bool {
+	lower := strings.ToLower(url)
+	// Memaksa pencocokan dengan pembatas yang jelas
+	return strings.Contains(lower, "://"+domain) || // cocok: https://x.com
+		strings.Contains(lower, "."+domain) || // cocok: https://www.x.com (menolak terabox.com karena butuh titik sebelum x)
+		strings.Contains(lower, "/"+domain) || // cocok: domain.com/x.com
+		strings.HasPrefix(lower, domain) // cocok: x.com/status/123
+}
+
 // IsSupportedURL mengecek apakah URL termasuk dalam salah satu platform yang didukung
 func IsSupportedURL(url string) bool {
-	lower := strings.ToLower(url)
 	for _, p := range platforms {
 		for _, d := range p.Domains {
-			if strings.Contains(lower, d) {
+			// Perbaikan: Gunakan checkDomainMatch agar tidak tabrakan
+			if checkDomainMatch(url, d) {
 				return true
 			}
 		}
@@ -93,15 +103,11 @@ func IsSupportedURL(url string) bool {
 
 // IsPlatformURL mengecek apakah URL termasuk platform tertentu
 func IsPlatformURL(url, platformName string) bool {
-	lower := strings.ToLower(url)
 	for _, p := range platforms {
 		if p.Name == platformName {
 			for _, d := range p.Domains {
-				// Gunakan boundary check, bukan string.Contains
-				// Cari domain sebagai word boundary (preceded by :// atau /)
-				if strings.Contains(lower, "://"+d) ||
-					strings.Contains(lower, "/"+d) ||
-					strings.HasPrefix(lower, d) {
+				// Perbaikan: Gunakan checkDomainMatch
+				if checkDomainMatch(url, d) {
 					return true
 				}
 			}
@@ -112,13 +118,11 @@ func IsPlatformURL(url, platformName string) bool {
 
 // DetectPlatform mengembalikan nama platform dari URL
 func DetectPlatform(url string) string {
-	lower := strings.ToLower(url)
-	// Sort by domain length (longest first) untuk prioritas yang benar
+	// Sort by domain length (longest first) untuk prioritas yang benar jika diperlukan
 	for _, p := range platforms {
 		for _, d := range p.Domains {
-			if strings.Contains(lower, "://"+d) ||
-				strings.Contains(lower, "/"+d) ||
-				strings.HasPrefix(lower, d) {
+			// Perbaikan: Gunakan checkDomainMatch
+			if checkDomainMatch(url, d) {
 				return p.Name
 			}
 		}

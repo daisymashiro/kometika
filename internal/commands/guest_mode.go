@@ -110,7 +110,7 @@ func processGuestTask(ctx context.Context, client *tg.Client, inlineMsgID tg.Inp
 	case config.IsPlatformURL(url, "twitter"):
 		err = processGuestTwitter(ctx, client, inlineMsgID, url, logger)
 	default:
-		editGuestInlineText(ctx, client, inlineMsgID, "❌ Platform tidak didukung.")
+		editGuestInlineText(ctx, client, inlineMsgID, "❌ Platform tidak didukung. \n\nSaat ini hanya mendukung Tiktok, Facebook, Instagram, dan Twitter (X).")
 		log.LogWarn(ctx, "GuestUnsupported", "Platform tidak didukung", "url="+url)
 		return
 	}
@@ -147,7 +147,7 @@ func processGuestTikTok(ctx context.Context, client *tg.Client, inlineMsgID tg.I
 		Extension: ".mp4",
 	}
 	filename := fmt.Sprintf("%s.mp4", data.ID)
-	fileID, accessHash, err := uploadMediaToCacheWithRetry(ctx, client, data.VideoURL, info, filename, data.CoverURL, 3)
+	fileID, accessHash, fileRef, err := uploadMediaToCacheWithRetry(ctx, client, data.VideoURL, info, filename, data.CoverURL, 3)
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,11 @@ func processGuestTikTok(ctx context.Context, client *tg.Client, inlineMsgID tg.I
 		caption = caption[:200]
 	}
 	inputMedia := &tg.InputMediaDocument{
-		ID: &tg.InputDocument{ID: fileID, AccessHash: accessHash},
+		ID: &tg.InputDocument{
+			ID:            fileID,
+			AccessHash:    accessHash,
+			FileReference: fileRef,
+		},
 	}
 	return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
 }
@@ -179,23 +183,27 @@ func processGuestInstagram(ctx context.Context, client *tg.Client, inlineMsgID t
 			Extension: ".mp4",
 		}
 		filename := fmt.Sprintf("%s.mp4", data.ID)
-		fileID, accessHash, err := uploadMediaToCacheWithRetry(ctx, client, data.VideoURL, info, filename, data.CoverURL, 3)
+		fileID, accessHash, fileRef, err := uploadMediaToCacheWithRetry(ctx, client, data.VideoURL, info, filename, data.CoverURL, 3)
 		if err != nil {
 			return err
 		}
 		caption := fmt.Sprintf("%s\n\n@Kometika_bot", data.Title)
-		if len(caption) > 200 {
-			caption = caption[:200]
+		if len(caption) > 400 {
+			caption = caption[:400]
 		}
 		inputMedia := &tg.InputMediaDocument{
-			ID: &tg.InputDocument{ID: fileID, AccessHash: accessHash},
+			ID: &tg.InputDocument{
+				ID:            fileID,
+				AccessHash:    accessHash,
+				FileReference: fileRef,
+			},
 		}
 		return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
 	}
 	if len(data.ImageURLs) == 1 {
 		imgURL := data.ImageURLs[0]
 		editGuestInlineText(ctx, client, inlineMsgID, "📥 Mengunduh foto...")
-		fileID, accessHash, err := uploadImageToCacheWithRetry(ctx, client, imgURL, 3)
+		fileID, accessHash, fileRef, err := uploadImageToCacheWithRetry(ctx, client, imgURL, 3)
 		if err != nil {
 			return err
 		}
@@ -204,7 +212,11 @@ func processGuestInstagram(ctx context.Context, client *tg.Client, inlineMsgID t
 			caption = caption[:200]
 		}
 		inputMedia := &tg.InputMediaPhoto{
-			ID: &tg.InputPhoto{ID: fileID, AccessHash: accessHash},
+			ID: &tg.InputPhoto{
+				ID:            fileID,
+				AccessHash:    accessHash,
+				FileReference: fileRef,
+			},
 		}
 		return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
 	}
@@ -227,7 +239,7 @@ func processGuestFacebook(ctx context.Context, client *tg.Client, inlineMsgID tg
 		Extension: ".mp4",
 	}
 	filename := fmt.Sprintf("%s.mp4", data.ID)
-	fileID, accessHash, err := uploadMediaToCacheWithRetry(ctx, client, data.VidioURL, info, filename, data.CoverURL, 3)
+	fileID, accessHash, fileRef, err := uploadMediaToCacheWithRetry(ctx, client, data.VidioURL, info, filename, data.CoverURL, 3)
 	if err != nil {
 		return err
 	}
@@ -236,7 +248,11 @@ func processGuestFacebook(ctx context.Context, client *tg.Client, inlineMsgID tg
 		caption = caption[:200]
 	}
 	inputMedia := &tg.InputMediaDocument{
-		ID: &tg.InputDocument{ID: fileID, AccessHash: accessHash},
+		ID: &tg.InputDocument{
+			ID:            fileID,
+			AccessHash:    accessHash,
+			FileReference: fileRef,
+		},
 	}
 	return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
 }
@@ -263,10 +279,10 @@ func processGuestTwitter(ctx context.Context, client *tg.Client, inlineMsgID tg.
 		Extension: ".mp4",
 	}
 	filename := fmt.Sprintf("%s.mp4", data.ID)
-	fileID, accessHash, err := uploadMediaToCacheWithRetry(ctx, client, data.DownloadURL, info, filename, data.CoverURL, 3)
+	fileID, accessHash, fileRef, err := uploadMediaToCacheWithRetry(ctx, client, data.DownloadURL, info, filename, data.CoverURL, 3)
 	if err != nil {
 		// Coba sebagai gambar
-		fileID, accessHash, err2 := uploadImageToCacheWithRetry(ctx, client, data.DownloadURL, 3)
+		fileID, accessHash, fileRef, err2 := uploadImageToCacheWithRetry(ctx, client, data.DownloadURL, 3)
 		if err2 != nil {
 			return err
 		}
@@ -275,7 +291,11 @@ func processGuestTwitter(ctx context.Context, client *tg.Client, inlineMsgID tg.
 			caption = caption[:200]
 		}
 		inputMedia := &tg.InputMediaPhoto{
-			ID: &tg.InputPhoto{ID: fileID, AccessHash: accessHash},
+			ID: &tg.InputPhoto{
+				ID:            fileID,
+				AccessHash:    accessHash,
+				FileReference: fileRef,
+			},
 		}
 		return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
 	}
@@ -284,44 +304,48 @@ func processGuestTwitter(ctx context.Context, client *tg.Client, inlineMsgID tg.
 		caption = caption[:400]
 	}
 	inputMedia := &tg.InputMediaDocument{
-		ID: &tg.InputDocument{ID: fileID, AccessHash: accessHash},
+		ID: &tg.InputDocument{
+			ID:            fileID,
+			AccessHash:    accessHash,
+			FileReference: fileRef,
+		},
 	}
 	return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
 }
 
 // --- Upload ke cache dengan retry ---
 
-func uploadMediaToCacheWithRetry(ctx context.Context, client *tg.Client, mediaURL string, info api.ContentTypeInfo, filename, thumbURL string, maxRetries int) (int64, int64, error) {
+func uploadMediaToCacheWithRetry(ctx context.Context, client *tg.Client, mediaURL string, info api.ContentTypeInfo, filename, thumbURL string, maxRetries int) (int64, int64, []byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		fileID, accessHash, err := uploadMediaToCache(ctx, client, mediaURL, info, filename, thumbURL)
+		fileID, accessHash, fileRef, err := uploadMediaToCache(ctx, client, mediaURL, info, filename, thumbURL)
 		if err == nil {
-			return fileID, accessHash, nil
+			return fileID, accessHash, fileRef, nil
 		}
 		lastErr = err
 		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
 	}
-	return 0, 0, fmt.Errorf("setelah %d percobaan: %w", maxRetries, lastErr)
+	return 0, 0, nil, fmt.Errorf("setelah %d percobaan: %w", maxRetries, lastErr)
 }
 
-func uploadImageToCacheWithRetry(ctx context.Context, client *tg.Client, imageURL string, maxRetries int) (int64, int64, error) {
+func uploadImageToCacheWithRetry(ctx context.Context, client *tg.Client, imageURL string, maxRetries int) (int64, int64, []byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		fileID, accessHash, err := uploadImageToCache(ctx, client, imageURL)
+		fileID, accessHash, fileRef, err := uploadImageToCache(ctx, client, imageURL)
 		if err == nil {
-			return fileID, accessHash, nil
+			return fileID, accessHash, fileRef, nil
 		}
 		lastErr = err
 		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
 	}
-	return 0, 0, fmt.Errorf("setelah %d percobaan: %w", maxRetries, lastErr)
+	return 0, 0, nil, fmt.Errorf("setelah %d percobaan: %w", maxRetries, lastErr)
 }
 
 // uploadMediaToCache dengan atribut berdasarkan info dan thumbnail
-func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string, info api.ContentTypeInfo, filename, thumbURL string) (int64, int64, error) {
+func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string, info api.ContentTypeInfo, filename, thumbURL string) (int64, int64, []byte, error) {
 	stream, _, err := api.GetVideoStream(ctx, mediaURL)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	defer stream.Close()
 
@@ -335,7 +359,7 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 		var err2 error
 		peer, err2 = getSelfPeer(ctx, client)
 		if err2 != nil {
-			return 0, 0, err2
+			return 0, 0, nil, err2
 		}
 	}
 
@@ -344,7 +368,7 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 	// Upload file utama
 	file, err := up.FromReader(ctx, filename, stream)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 
 	// === Upload Thumbnail jika ada ===
@@ -352,7 +376,6 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 	if thumbURL != "" {
 		thumbBytes, err := api.GetThumbnail(ctx, thumbURL)
 		if err == nil && len(thumbBytes) > 0 {
-			// PERBAIKAN: gunakan bytes.NewReader agar sesuai dengan io.Reader
 			converted, err := media.ProcessAndValidateImageBytes(bytes.NewReader(thumbBytes), nil)
 			if err == nil && len(converted) > 0 {
 				thumbBytes = converted
@@ -372,9 +395,10 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 	switch info.Category {
 	case api.ContentVideo:
 		attrs = append(attrs, &tg.DocumentAttributeVideo{
-			Duration: 172800.0,
-			W:        0,
-			H:        0,
+			Duration:          (48 * time.Hour).Seconds(),
+			W:                 0,
+			H:                 0,
+			SupportsStreaming: info.MimeType == "video/mp4", // Tambahan flag
 		})
 	case api.ContentAudio:
 		attrs = append(attrs, &tg.DocumentAttributeAudio{})
@@ -390,18 +414,23 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 		mediaUpload.SetThumb(thumbFile)
 	}
 
+	randID, err := media.RandomID() // Menggunakan media.RandomID()
+	if err != nil {
+		return 0, 0, nil, err
+	}
+
 	req := &tg.MessagesSendMediaRequest{
 		Peer:     peer,
 		Media:    mediaUpload,
 		Message:  "temp-cache",
-		RandomID: time.Now().UnixNano(),
+		RandomID: randID,
 	}
 	updates, err := client.MessagesSendMedia(ctx, req)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 
-	// Ekstrak document ID
+	// Ekstrak document ID, AccessHash, dan FileReference
 	switch v := updates.(type) {
 	case *tg.Updates:
 		for _, update := range v.Updates {
@@ -409,7 +438,7 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 				if m, ok := msg.Message.(*tg.Message); ok {
 					if docMedia, ok := m.Media.(*tg.MessageMediaDocument); ok {
 						if doc, ok := docMedia.Document.(*tg.Document); ok {
-							return doc.ID, doc.AccessHash, nil
+							return doc.ID, doc.AccessHash, doc.FileReference, nil
 						}
 					}
 				}
@@ -418,7 +447,7 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 				if m, ok := msg.Message.(*tg.Message); ok {
 					if docMedia, ok := m.Media.(*tg.MessageMediaDocument); ok {
 						if doc, ok := docMedia.Document.(*tg.Document); ok {
-							return doc.ID, doc.AccessHash, nil
+							return doc.ID, doc.AccessHash, doc.FileReference, nil
 						}
 					}
 				}
@@ -430,7 +459,7 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 				if m, ok := msg.Message.(*tg.Message); ok {
 					if docMedia, ok := m.Media.(*tg.MessageMediaDocument); ok {
 						if doc, ok := docMedia.Document.(*tg.Document); ok {
-							return doc.ID, doc.AccessHash, nil
+							return doc.ID, doc.AccessHash, doc.FileReference, nil
 						}
 					}
 				}
@@ -439,7 +468,7 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 				if m, ok := msg.Message.(*tg.Message); ok {
 					if docMedia, ok := m.Media.(*tg.MessageMediaDocument); ok {
 						if doc, ok := docMedia.Document.(*tg.Document); ok {
-							return doc.ID, doc.AccessHash, nil
+							return doc.ID, doc.AccessHash, doc.FileReference, nil
 						}
 					}
 				}
@@ -448,30 +477,32 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 	case *tg.UpdateShortSentMessage:
 		if docMedia, ok := v.Media.(*tg.MessageMediaDocument); ok {
 			if doc, ok := docMedia.Document.(*tg.Document); ok {
-				return doc.ID, doc.AccessHash, nil
+				return doc.ID, doc.AccessHash, doc.FileReference, nil
 			}
 		}
 	default:
-		return 0, 0, fmt.Errorf("tipe updates tidak didukung: %T", updates)
+		return 0, 0, nil, fmt.Errorf("tipe updates tidak didukung: %T", updates)
 	}
-	return 0, 0, fmt.Errorf("tidak dapat menemukan document ID")
+	return 0, 0, nil, fmt.Errorf("tidak dapat menemukan document ID")
 }
 
-// uploadImageToCache (tidak berubah)
-func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string) (int64, int64, error) {
+// uploadImageToCache
+func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string) (int64, int64, []byte, error) {
 	stream, _, err := api.GetVideoStream(ctx, imageURL)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	defer stream.Close()
 
-	imgReader, err := media.ProcessAndValidateImage(stream, nil)
+	// Baca stream sepenuhnya ke buffer sebelum divalidasi
+	body, err := io.ReadAll(stream)
 	if err != nil {
-		imgReader = stream
+		return 0, 0, nil, err
 	}
-	body, err := io.ReadAll(imgReader)
-	if err != nil {
-		return 0, 0, err
+
+	convertedBody, err := media.ProcessAndValidateImageBytes(bytes.NewReader(body), nil)
+	if err == nil && len(convertedBody) > 0 {
+		body = convertedBody
 	}
 
 	peer := getCachePeer()
@@ -479,25 +510,30 @@ func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string)
 		var err2 error
 		peer, err2 = getSelfPeer(ctx, client)
 		if err2 != nil {
-			return 0, 0, err2
+			return 0, 0, nil, err2
 		}
 	}
 
 	up := uploader.NewUploader(client).WithThreads(1)
 	file, err := up.FromBytes(ctx, "temp.jpg", body)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
+	}
+
+	randID, err := media.RandomID()
+	if err != nil {
+		return 0, 0, nil, err
 	}
 
 	req := &tg.MessagesSendMediaRequest{
 		Peer:     peer,
 		Media:    &tg.InputMediaUploadedPhoto{File: file},
 		Message:  "temp",
-		RandomID: time.Now().UnixNano(),
+		RandomID: randID,
 	}
 	updates, err := client.MessagesSendMedia(ctx, req)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 
 	switch v := updates.(type) {
@@ -507,7 +543,7 @@ func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string)
 				if m, ok := msg.Message.(*tg.Message); ok {
 					if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
 						if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
-							return photo.ID, photo.AccessHash, nil
+							return photo.ID, photo.AccessHash, photo.FileReference, nil
 						}
 					}
 				}
@@ -516,7 +552,7 @@ func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string)
 				if m, ok := msg.Message.(*tg.Message); ok {
 					if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
 						if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
-							return photo.ID, photo.AccessHash, nil
+							return photo.ID, photo.AccessHash, photo.FileReference, nil
 						}
 					}
 				}
@@ -528,7 +564,7 @@ func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string)
 				if m, ok := msg.Message.(*tg.Message); ok {
 					if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
 						if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
-							return photo.ID, photo.AccessHash, nil
+							return photo.ID, photo.AccessHash, photo.FileReference, nil
 						}
 					}
 				}
@@ -537,7 +573,7 @@ func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string)
 				if m, ok := msg.Message.(*tg.Message); ok {
 					if photoMedia, ok := m.Media.(*tg.MessageMediaPhoto); ok {
 						if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
-							return photo.ID, photo.AccessHash, nil
+							return photo.ID, photo.AccessHash, photo.FileReference, nil
 						}
 					}
 				}
@@ -546,13 +582,13 @@ func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string)
 	case *tg.UpdateShortSentMessage:
 		if photoMedia, ok := v.Media.(*tg.MessageMediaPhoto); ok {
 			if photo, ok := photoMedia.Photo.(*tg.Photo); ok {
-				return photo.ID, photo.AccessHash, nil
+				return photo.ID, photo.AccessHash, photo.FileReference, nil
 			}
 		}
 	default:
-		return 0, 0, fmt.Errorf("tipe updates tidak didukung: %T", updates)
+		return 0, 0, nil, fmt.Errorf("tipe updates tidak didukung: %T", updates)
 	}
-	return 0, 0, fmt.Errorf("tidak dapat menemukan photo ID")
+	return 0, 0, nil, fmt.Errorf("tidak dapat menemukan photo ID")
 }
 
 // getSelfPeer
