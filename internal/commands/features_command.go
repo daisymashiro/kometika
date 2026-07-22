@@ -4,13 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
 	"mybot/internal/config"
 
-	htmlparser "github.com/gotd/td/telegram/message/html"
 	"github.com/gotd/td/telegram/message"
+	htmlparser "github.com/gotd/td/telegram/message/html"
 	"github.com/gotd/td/tg"
 	"go.uber.org/zap"
 )
@@ -50,7 +51,7 @@ func HandleFeaturesCommand(ctx context.Context, client *tg.Client, msg *tg.Messa
 
 	// Urutkan fitur
 	featureList := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
-	
+
 	for _, feature := range featureList {
 		status := "❌ Nonaktif"
 		if enabled, exists := features[feature]; exists && enabled {
@@ -74,19 +75,8 @@ func HandleListStatusCommand(ctx context.Context, client *tg.Client, msg *tg.Mes
 // HandleFeatureOnCommand mengaktifkan fitur (hanya owner)
 func HandleFeatureOnCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, args []string, logger *zap.Logger) error {
 	// Cek apakah user adalah owner
-	userID := GetUserIDFromMessage(msg)
-	if !IsOwner(userID) {
-		logger.Warn("Non-owner mencoba mengaktifkan fitur", zap.Int64("user_id", userID))
-		
-		peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
-		if peer != nil {
-			msgSender := message.NewSender(client)
-			_, _ = msgSender.To(peer).Text(ctx, "❌ Hanya owner yang dapat menggunakan command ini.")
-		}
-		return nil
-	}
 
-	if len(args) < 2 {
+	if len(args) < 1 {
 		peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
 		if peer != nil {
 			msgSender := message.NewSender(client)
@@ -95,18 +85,12 @@ func HandleFeatureOnCommand(ctx context.Context, client *tg.Client, msg *tg.Mess
 		return nil
 	}
 
-	feature := strings.ToLower(args[1])
+	feature := strings.ToLower(args[0])
 	fm := config.GetFeatureManager()
-	
+
 	// Validasi nama fitur
 	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
-	isValid := false
-	for _, f := range validFeatures {
-		if f == feature {
-			isValid = true
-			break
-		}
-	}
+	isValid := slices.Contains(validFeatures, feature)
 
 	peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
 	msgSender := message.NewSender(client)
@@ -119,7 +103,7 @@ func HandleFeatureOnCommand(ctx context.Context, client *tg.Client, msg *tg.Mess
 	}
 
 	fm.Enable(feature)
-	logger.Info("Fitur diaktifkan oleh owner", zap.String("feature", feature), zap.Int64("owner_id", userID))
+	logger.Info("Fitur diaktifkan oleh owner", zap.String("feature", feature))
 
 	if peer != nil {
 		_, _ = msgSender.To(peer).StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("✅ Fitur <b>%s</b> telah diaktifkan.", strings.Title(feature))))
@@ -131,19 +115,8 @@ func HandleFeatureOnCommand(ctx context.Context, client *tg.Client, msg *tg.Mess
 // HandleFeatureOffCommand menonaktifkan fitur (hanya owner)
 func HandleFeatureOffCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, args []string, logger *zap.Logger) error {
 	// Cek apakah user adalah owner
-	userID := GetUserIDFromMessage(msg)
-	if !IsOwner(userID) {
-		logger.Warn("Non-owner mencoba menonaktifkan fitur", zap.Int64("user_id", userID))
-		
-		peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
-		if peer != nil {
-			msgSender := message.NewSender(client)
-			_, _ = msgSender.To(peer).Text(ctx, "❌ Hanya owner yang dapat menggunakan command ini.")
-		}
-		return nil
-	}
 
-	if len(args) < 2 {
+	if len(args) < 1 {
 		peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
 		if peer != nil {
 			msgSender := message.NewSender(client)
@@ -152,18 +125,12 @@ func HandleFeatureOffCommand(ctx context.Context, client *tg.Client, msg *tg.Mes
 		return nil
 	}
 
-	feature := strings.ToLower(args[1])
+	feature := strings.ToLower(args[0])
 	fm := config.GetFeatureManager()
-	
+
 	// Validasi nama fitur
 	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
-	isValid := false
-	for _, f := range validFeatures {
-		if f == feature {
-			isValid = true
-			break
-		}
-	}
+	isValid := slices.Contains(validFeatures, feature)
 
 	peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
 	msgSender := message.NewSender(client)
@@ -176,7 +143,7 @@ func HandleFeatureOffCommand(ctx context.Context, client *tg.Client, msg *tg.Mes
 	}
 
 	fm.Disable(feature)
-	logger.Info("Fitur dinonaktifkan oleh owner", zap.String("feature", feature), zap.Int64("owner_id", userID))
+	logger.Info("Fitur dinonaktifkan oleh owner", zap.String("feature", feature))
 
 	if peer != nil {
 		_, _ = msgSender.To(peer).StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("🚫 Fitur <b>%s</b> telah dinonaktifkan.", strings.Title(feature))))

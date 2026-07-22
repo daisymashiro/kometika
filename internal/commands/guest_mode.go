@@ -100,17 +100,40 @@ func sendGuestInlineResult(ctx context.Context, client *tg.Client, queryID int64
 
 func processGuestTask(ctx context.Context, client *tg.Client, inlineMsgID tg.InputBotInlineMessageIDClass, url string, logger *zap.Logger) {
 	var err error
+	fm := config.GetFeatureManager()
+
 	switch {
 	case config.IsPlatformURL(url, "tiktok"):
+		// 2. Cek apakah fitur aktif sebelum lanjut
+		if !fm.IsEnabled("tiktok") {
+			editGuestInlineText(ctx, client, inlineMsgID, "  Fitur TikTok sedang dinonaktifkan.")
+			return
+		}
 		err = processGuestTikTok(ctx, client, inlineMsgID, url, logger)
+
 	case config.IsPlatformURL(url, "instagram"):
+		if !fm.IsEnabled("instagram") {
+			editGuestInlineText(ctx, client, inlineMsgID, "  Fitur Instagram sedang dinonaktifkan.")
+			return
+		}
 		err = processGuestInstagram(ctx, client, inlineMsgID, url, logger)
+
 	case config.IsPlatformURL(url, "facebook"):
+		if !fm.IsEnabled("facebook") {
+			editGuestInlineText(ctx, client, inlineMsgID, "  Fitur Facebook sedang dinonaktifkan.")
+			return
+		}
 		err = processGuestFacebook(ctx, client, inlineMsgID, url, logger)
+
 	case config.IsPlatformURL(url, "twitter"):
+		if !fm.IsEnabled("twitter") {
+			editGuestInlineText(ctx, client, inlineMsgID, "  Fitur Twitter (X) sedang dinonaktifkan.")
+			return
+		}
 		err = processGuestTwitter(ctx, client, inlineMsgID, url, logger)
+
 	default:
-		editGuestInlineText(ctx, client, inlineMsgID, "❌ Platform tidak didukung. \n\nSaat ini hanya mendukung Tiktok, Facebook, Instagram, dan Twitter (X).")
+		editGuestInlineText(ctx, client, inlineMsgID, "  Platform tidak didukung. \n\nSaat ini hanya mendukung Tiktok, Facebook, Instagram, dan Twitter (X).")
 		log.LogWarn(ctx, "GuestUnsupported", "Platform tidak didukung", "url="+url)
 		return
 	}
@@ -320,7 +343,7 @@ func uploadMediaToCacheWithRetry(ctx context.Context, client *tg.Client, mediaUR
 			return fileID, accessHash, fileRef, nil
 		}
 		lastErr = err
-		
+
 		// Context-aware sleep menggunakan select
 		retryDelay := time.Duration(attempt) * 500 * time.Millisecond
 		select {
@@ -343,7 +366,7 @@ func uploadImageToCacheWithRetry(ctx context.Context, client *tg.Client, imageUR
 			return fileID, accessHash, fileRef, nil
 		}
 		lastErr = err
-		
+
 		// Context-aware sleep menggunakan select
 		retryDelay := time.Duration(attempt) * 500 * time.Millisecond
 		select {

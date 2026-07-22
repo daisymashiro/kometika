@@ -170,10 +170,26 @@ func (r *CommandRouter) handleListStatus(ctx context.Context, msg *tg.Message, e
 }
 
 func (r *CommandRouter) handleOn(ctx context.Context, msg *tg.Message, entities tg.Entities, args []string, user *tg.User) error {
+	if user == nil || user.ID != r.rootID {
+		peer, _ := GetPeerFromMessage(ctx, r.client, msg, entities)
+		if peer != nil {
+			sender := message.NewSender(r.client)
+			_, _ = sender.To(peer).Reply(msg.ID).Text(ctx, "  Hanya owner yang dapat menggunakan command ini.")
+		}
+		return nil
+	}
 	return HandleFeatureOnCommand(ctx, r.client, msg, entities, args, r.logger)
 }
 
 func (r *CommandRouter) handleOff(ctx context.Context, msg *tg.Message, entities tg.Entities, args []string, user *tg.User) error {
+	if user == nil || user.ID != r.rootID {
+		peer, _ := GetPeerFromMessage(ctx, r.client, msg, entities)
+		if peer != nil {
+			sender := message.NewSender(r.client)
+			_, _ = sender.To(peer).Reply(msg.ID).Text(ctx, "  Hanya owner yang dapat menggunakan command ini.")
+		}
+		return nil
+	}
 	return HandleFeatureOffCommand(ctx, r.client, msg, entities, args, r.logger)
 }
 
