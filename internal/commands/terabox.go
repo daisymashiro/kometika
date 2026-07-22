@@ -11,6 +11,7 @@ import (
 
 	"mybot/internal/api"
 	"mybot/internal/api/terabox"
+	"mybot/internal/config"
 	"mybot/internal/media"
 
 	"github.com/gotd/td/telegram/uploader"
@@ -18,25 +19,6 @@ import (
 	"go.uber.org/zap"
 	"mybot/internal/log"
 )
-
-// ─── Domain list ─────────────────────────────────────────────────────────────
-
-var teraboxDomains = []string{
-	"terabox.com", "freeterabox.com", "teraboxapp.com", "1024terabox.com",
-	"terabox.app", "mirrobox.com", "nephobox.com", "1024tera.com",
-	"4funbox.com", "dubox.com", "gibibox.com", "momerybox.com",
-	"terabox.fun", "teraboxshare.com", "tibibox.com",
-}
-
-func IsTeraboxLink(link string) bool {
-	link = strings.ToLower(link)
-	for _, domain := range teraboxDomains {
-		if strings.Contains(link, domain) {
-			return true
-		}
-	}
-	return false
-}
 
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
@@ -108,6 +90,17 @@ func parseFileSizeToBytes(sizeStr string) int64 {
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 func HandleTerabox(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string) error {
+	// Cek feature toggle
+	fm := config.GetFeatureManager()
+	if !fm.IsEnabled("terabox") {
+		zap.L().Info("Fitur Terabox dinonaktifkan")
+		return nil
+	}
+	if _, isPrivate := msg.PeerID.(*tg.PeerUser); !isPrivate {
+		// Jika bukan Private Chat (artinya Grup/Supergroup/Channel),
+		// langsung kembalikan nil agar bot mengabaikan tanpa error/pesan apapun.
+		return nil
+	}
 	switch msg.PeerID.(type) {
 	case *tg.PeerUser:
 		return handleTeraboxPrivate(ctx, client, msg, url)

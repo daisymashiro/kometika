@@ -313,6 +313,39 @@ func (m *MediaSender) SendPhotoStream(ctx context.Context, peer tg.InputPeerClas
 	return err
 }
 
+// UploadPhotoForReuse uploads a photo and returns InputMediaPhoto for reuse
+func (m *MediaSender) UploadPhotoForReuse(ctx context.Context, peer tg.InputPeerClass, file tg.InputFileClass) (*tg.InputMediaPhoto, error) {
+	// Daftarkan media
+	uploadedMedia, err := m.api.MessagesUploadMedia(ctx, &tg.MessagesUploadMediaRequest{
+		Peer: peer,
+		Media: &tg.InputMediaUploadedPhoto{
+			File: file,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("registrasi foto gagal: %w", err)
+	}
+
+	// Konversi ke Photo
+	msgMedia, ok := uploadedMedia.(*tg.MessageMediaPhoto)
+	if !ok {
+		return nil, fmt.Errorf("tipe media tidak valid: %T", uploadedMedia)
+	}
+	photo, ok := msgMedia.Photo.(*tg.Photo)
+	if !ok {
+		return nil, fmt.Errorf("tipe foto tidak valid: %T", msgMedia.Photo)
+	}
+
+	// Return InputMediaPhoto yang bisa direuse
+	return &tg.InputMediaPhoto{
+		ID: &tg.InputPhoto{
+			ID:            photo.ID,
+			AccessHash:    photo.AccessHash,
+			FileReference: photo.FileReference,
+		},
+	}, nil
+}
+
 // ================= ALBUM =================
 
 // func (m *MediaSender) SendPhotoAlbumStream(ctx context.Context, peer tg.InputPeerClass,

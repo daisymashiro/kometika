@@ -10,6 +10,7 @@ import (
 	"github.com/gotd/td/tgerr"
 
 	"mybot/internal/api"
+	"mybot/internal/assets"
 	"mybot/internal/log"
 )
 
@@ -70,8 +71,6 @@ func (m *MediaSender) SendSmartMedia(
 
 	var thumb tg.InputFileClass
 
-	defaultThumbURL := "https://4kwallpapers.com/images/wallpapers/kawaii-cat-girl-5120x2880-26545.png"
-
 	tryProcessThumb := func(url string) tg.InputFileClass {
 		if url == "" {
 			return nil
@@ -95,8 +94,12 @@ func (m *MediaSender) SendSmartMedia(
 	if info.Category == api.ContentVideo || info.Category == api.ContentAudio {
 		thumb = tryProcessThumb(thumbnailURL)
 
+		// Jika thumbnail custom gagal, gunakan embedded default
 		if thumb == nil {
-			thumb = tryProcessThumb(defaultThumbURL)
+			uploadedThumb, err := m.UploadThumbnail(ctx, assets.DefaultThumbnail)
+			if err == nil {
+				thumb = uploadedThumb
+			}
 		}
 	}
 
@@ -259,4 +262,3 @@ func (m *MediaSender) UploadThumbnail(ctx context.Context, data []byte) (tg.Inpu
 
 	return m.up.FromBytes(ctx, "thumb.jpg", data)
 }
-

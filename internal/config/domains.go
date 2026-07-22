@@ -48,6 +48,8 @@ var platforms = []PlatformDomain{
 			"terabox.fun",
 			"1024tera.com",
 			"teraboxshare.com",
+			"freeterabox.com", "teraboxapp.com", "1024terabox.com", "mirrobox.com",
+			"nephobox.com", "4funbox.com", "dubox.com", "gibibox.com", "momerybox.com", "tibibox.com",
 		},
 	},
 	{

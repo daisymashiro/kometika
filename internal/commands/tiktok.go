@@ -13,14 +13,15 @@ import (
 
 	_ "golang.org/x/image/webp"
 
-	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"go.uber.org/zap"
 
 	"mybot/internal/api"
 	"mybot/internal/api/tiktok"
 	"mybot/internal/cache"
+	"mybot/internal/config"
 	"mybot/internal/log"
 	"mybot/internal/media"
 )
@@ -30,45 +31,21 @@ func HandleTikTok(ctx context.Context, client *tg.Client, msg *tg.Message, entit
 		return nil
 	}
 
+	// Cek feature toggle
+	fm := config.GetFeatureManager()
+	if !fm.IsEnabled("tiktok") {
+		logger.Info("Fitur TikTok dinonaktifkan")
+		return nil
+	}
+
+	// Gunakan middleware WithLoading
+	return WithLoading(ctx, client, msg, entities, "TikTok", logger, func(ctx context.Context, lc *LoadingContext) error {
+		return processTikTok(ctx, client, lc, url, logger)
+	})
+}
+
+func processTikTok(ctx context.Context, client *tg.Client, lc *LoadingContext, url string, logger *zap.Logger) error {
 	mediaSender := media.NewMediaSender(client)
-
-	if _, ok := msg.PeerID.(*tg.PeerUser); !ok {
-		peer, err := GetPeerFromMessage(ctx, client, msg, entities)
-		if err != nil || peer == nil {
-			return err
-		}
-		topicID := getTopicID(msg)
-		replyTo := buildReplyTo(msg.ID, topicID)
-		return handleTikTokGroup(ctx, client, peer, url, replyTo, logger)
-	}
-
-	// ── Private chat ──
-	peer, err := GetPeerFromMessage(ctx, client, msg, entities)
-	if err != nil {
-		logger.Error("Gagal dapatkan peer", zap.Error(err))
-		return err
-	}
-
-	msgSender := message.NewSender(client)
-
-	progressMsg, err := msgSender.To(peer).Text(ctx, "⏳ Memproses TikTok, mohon tunggu...")
-	if err != nil {
-		logger.Warn("Gagal kirim pesan progress", zap.Error(err))
-	} else {
-		progressMsgID, _ := media.ExtractMessageID(progressMsg)
-		defer func() {
-			if progressMsgID == 0 {
-				return
-			}
-			go func() {
-				time.Sleep(1 * time.Second)
-				_, _ = client.MessagesDeleteMessages(context.Background(), &tg.MessagesDeleteMessagesRequest{
-					Revoke: true,
-					ID:     []int{progressMsgID},
-				})
-			}()
-		}()
-	}
 
 	data, stream, err := tiktok.FetchTikTokDataWithFallback(ctx, logger, url, func(apiName string, failErr error) {
 		logger.Warn("API Gagal (Otomatis Skip)", zap.String("api", apiName), zap.Error(failErr))
@@ -77,7 +54,12 @@ func HandleTikTok(ctx context.Context, client *tg.Client, msg *tg.Message, entit
 
 	if err != nil {
 		logger.Warn("Semua API gagal", zap.Error(err))
-		_, _ = msgSender.To(peer).Text(ctx, "❌ Gagal mengambil data dari TikTok.")
+		log.LogError(ctx, "TikTok.FetchData", err, "url="+url)
+		
+		// Edit pesan loading menjadi error
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengambil data dari TikTok.", logger)
+		}
 		return nil
 	}
 
@@ -90,26 +72,42 @@ func HandleTikTok(ctx context.Context, client *tg.Client, msg *tg.Message, entit
 		title = title[:400] + "..."
 	}
 
+	// Album handler
 	if data.IsAlbum && len(data.ImageURLs) > 0 {
-		err = kirimAlbumStream(ctx, client, peer, title, data.ImageURLs, logger)
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh album...", logger)
+		}
+		
+		err = kirimAlbumStream(ctx, client, lc.Peer, title, data.ImageURLs, lc.ReplyTo, logger)
 		if err != nil {
 			logger.Error("Gagal kirim album", zap.Error(err))
-			_, _ = msgSender.To(peer).Text(ctx, "❌ Gagal mengirim foto.")
+			log.LogError(ctx, "TikTok.SendAlbum", err, "url="+url)
+			if lc.ProgressMsgID != 0 {
+				_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim foto.", logger)
+			}
 		}
 		return nil
 	}
 
 	if data.VideoURL == "" {
-		_, _ = msgSender.To(peer).Text(ctx, "❌ Tidak ditemukan URL video.")
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Tidak ditemukan URL video.", logger)
+		}
 		return nil
 	}
 
+	// Simpan audio ke cache
 	if data.AudioURL != "" && data.ID != "" {
 		cache.SetAudio(data.ID, data.AudioURL, data.Title, "Tiktok Music")
 		logger.Info("Audio disimpan ke cache", zap.String("video_id", data.ID))
 	}
 
-	// ─── DETEKSI TIPE KONTEN OTOMATIS ──────────────────────────────────────
+	// Update pesan loading
+	if lc.ProgressMsgID != 0 {
+		_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh video...", logger)
+	}
+
+	// Deteksi tipe konten otomatis
 	info, fullStream, err := api.DetectAndClassifyStream(stream)
 	if err != nil {
 		logger.Warn("Gagal deteksi tipe konten, fallback ke video/mp4", zap.Error(err))
@@ -121,7 +119,7 @@ func HandleTikTok(ctx context.Context, client *tg.Client, msg *tg.Message, entit
 		fullStream = stream
 	}
 
-	// ─── PERSIAPAN THUMBNAIL ──────────────────────────────────────────────
+	// Persiapan thumbnail
 	var thumbFile tg.InputFileClass
 	if data.CoverURL != "" {
 		thumbBytes, err := api.GetThumbnail(ctx, data.CoverURL)
@@ -148,13 +146,16 @@ func HandleTikTok(ctx context.Context, client *tg.Client, msg *tg.Message, entit
 	caption := fmt.Sprintf("%s\n\n@Kometika_bot", title)
 	filename := fmt.Sprintf("%s.mp4", data.ID)
 
-	// ─── KIRIM DENGAN DYNAMIC STREAM ──────────────────────────────────────
+	// Kirim dengan dynamic stream
 	videoMsgUpdates, err := mediaSender.SendDynamicStream(
-		ctx, peer, fullStream, info, filename, caption, replyMarkup, nil, thumbFile,
+		ctx, lc.Peer, fullStream, info, filename, caption, replyMarkup, lc.ReplyTo, thumbFile,
 	)
 	if err != nil {
 		logger.Error("Gagal kirim video", zap.Error(err))
-		_, _ = msgSender.To(peer).Text(ctx, "Gagal mengirim video.")
+		log.LogError(ctx, "TikTok.SendVideo", err, "url="+url)
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim video.", logger)
+		}
 		return nil
 	}
 
@@ -167,144 +168,76 @@ func HandleTikTok(ctx context.Context, client *tg.Client, msg *tg.Message, entit
 
 	logger.Info("Video TikTok berhasil dikirim", zap.String("video_id", data.ID), zap.Int("msg_id", videoMsgID))
 
+	// Cleanup tombol audio setelah 2 menit dengan context-aware goroutine
 	if videoMsgID != 0 && data.AudioURL != "" && data.ID != "" {
-		go func(peerCopy tg.InputPeerClass, msgID int) {
-			time.Sleep(2 * time.Minute)
-			_, err := client.MessagesEditMessage(context.Background(), &tg.MessagesEditMessageRequest{
-				Peer:        peerCopy,
+		go scheduleAudioButtonCleanup(client, lc.Peer, videoMsgID, data.ID, logger)
+	} else if data.AudioURL != "" && data.ID != "" {
+		go scheduleAudioCacheCleanup(data.ID)
+	}
+
+	return nil
+}
+
+// scheduleAudioButtonCleanup dengan context-aware cleanup
+func scheduleAudioButtonCleanup(client *tg.Client, peer tg.InputPeerClass, msgID int, videoID string, logger *zap.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	select {
+	case <-time.After(2 * time.Minute):
+		// Timeout cleanup selesai, edit tombol
+		editCtx, editCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer editCancel()
+
+		for {
+			_, err := client.MessagesEditMessage(editCtx, &tg.MessagesEditMessageRequest{
+				Peer:        peer,
 				ID:          msgID,
 				ReplyMarkup: &tg.ReplyKeyboardHide{},
 			})
 			if err != nil {
-				logger.Warn("Gagal hapus tombol audio", zap.Error(err))
+				if d, ok := tgerr.AsFloodWait(err); ok {
+					logger.Warn("FloodWait saat hapus tombol audio", zap.Duration("wait", d))
+					select {
+					case <-time.After(d + time.Second):
+						continue
+					case <-editCtx.Done():
+						logger.Warn("Gagal menghapus tombol audio (timeout)", zap.Int("msg_id", msgID))
+						cache.DeleteAudio(videoID)
+						return
+					}
+				}
+				logger.Warn("Gagal menghapus tombol audio", zap.Int("msg_id", msgID), zap.Error(err))
+				cache.DeleteAudio(videoID)
+				return
 			}
-			cache.DeleteAudio(data.ID)
-		}(peer, videoMsgID)
-	} else if data.AudioURL != "" && data.ID != "" {
-		go func(videoID string) {
-			time.Sleep(2 * time.Minute)
-			cache.DeleteAudio(videoID)
-		}(data.ID)
-	}
+			break
+		}
 
-	return nil
+		cache.DeleteAudio(videoID)
+		logger.Info("Tombol audio dihapus otomatis", zap.Int("msg_id", msgID))
+
+	case <-ctx.Done():
+		// Context dibatalkan
+		cache.DeleteAudio(videoID)
+	}
 }
 
-// handleTikTokGroup menangani TikTok di grup/supergroup dengan reply support.
-func handleTikTokGroup(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, url string, replyTo *tg.InputReplyToMessage, logger *zap.Logger) error {
-	data, stream, err := tiktok.FetchTikTokDataWithFallback(ctx, logger, url, func(apiName string, failErr error) {
-		logger.Warn("API Grup Gagal (Otomatis Skip)", zap.String("api", apiName), zap.Error(failErr))
-	})
+// scheduleAudioCacheCleanup dengan context-aware cleanup
+func scheduleAudioCacheCleanup(videoID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
 
-	if err != nil {
-		logger.Warn("Gagal fetch data TikTok grup", zap.Error(err))
-		sendGroupText(ctx, client, peer, "❌ Gagal mengambil data dari TikTok.", replyTo)
-		return nil
+	select {
+	case <-time.After(2 * time.Minute):
+		cache.DeleteAudio(videoID)
+	case <-ctx.Done():
+		cache.DeleteAudio(videoID)
 	}
-
-	if stream != nil {
-		defer stream.Close()
-	}
-
-	title := data.Title
-	if len(title) > 400 {
-		title = title[:400] + "..."
-	}
-
-	if data.IsAlbum && len(data.ImageURLs) > 0 {
-		if err := kirimAlbumStreamGroup(ctx, client, peer, title, data.ImageURLs, replyTo, logger); err != nil {
-			logger.Error("Gagal kirim album TikTok grup", zap.Error(err))
-			sendGroupText(ctx, client, peer, "❌ Gagal mengirim foto.", replyTo)
-		}
-		return nil
-	}
-
-	if data.VideoURL == "" {
-		sendGroupText(ctx, client, peer, "❌ Tidak ditemukan URL video.", replyTo)
-		return nil
-	}
-
-	if data.AudioURL != "" && data.ID != "" {
-		cache.SetAudio(data.ID, data.AudioURL, data.Title, "Tiktok Music")
-		logger.Info("Audio disimpan ke cache (grup)", zap.String("video_id", data.ID))
-	}
-
-	// ─── DETEKSI TIPE KONTEN OTOMATIS ──────────────────────────────────────
-	info, fullStream, err := api.DetectAndClassifyStream(stream)
-	if err != nil {
-		logger.Warn("Gagal deteksi tipe konten, fallback ke video/mp4", zap.Error(err))
-		info = api.ContentTypeInfo{
-			MimeType:  "video/mp4",
-			Category:  api.ContentVideo,
-			Extension: ".mp4",
-		}
-		fullStream = stream
-	}
-
-	var thumbFile tg.InputFileClass
-	if data.CoverURL != "" {
-		thumbBytes, err := api.GetThumbnail(ctx, data.CoverURL)
-		if err == nil && len(thumbBytes) > 0 {
-			up := uploader.NewUploader(client).WithThreads(1)
-			thumbFile, _ = up.FromBytes(ctx, "thumb.jpg", thumbBytes)
-		}
-	}
-
-	var replyMarkup tg.ReplyMarkupClass
-	if data.AudioURL != "" && data.ID != "" {
-		replyMarkup = &tg.ReplyInlineMarkup{
-			Rows: []tg.KeyboardButtonRow{
-				{Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonCallback{Text: "Unduh Audio (MP3)", Data: fmt.Appendf([]byte{}, "mp3_%s", data.ID)},
-				}},
-			},
-		}
-	}
-
-	caption := fmt.Sprintf("%s\n\n@Kometika_bot", title)
-	filename := fmt.Sprintf("%s.mp4", data.ID)
-
-	sender := media.NewMediaSender(client)
-	videoMsgUpdates, err := sender.SendDynamicStream(
-		ctx, peer, fullStream, info, filename, caption, replyMarkup, replyTo, thumbFile,
-	)
-	if err != nil {
-		logger.Error("Gagal kirim video TikTok grup", zap.Error(err))
-		sendGroupText(ctx, client, peer, "❌ Gagal mengirim video.", replyTo)
-		return nil
-	}
-
-	var videoMsgID int
-	if videoMsgUpdates != nil {
-		if id, err := media.ExtractMessageID(videoMsgUpdates); err == nil {
-			videoMsgID = id
-		}
-	}
-
-	logger.Info("Video TikTok grup berhasil dikirim", zap.String("video_id", data.ID), zap.Int("msg_id", videoMsgID))
-
-	if videoMsgID != 0 && data.AudioURL != "" && data.ID != "" {
-		go func(peerCopy tg.InputPeerClass, msgID int) {
-			time.Sleep(2 * time.Minute)
-			_, _ = client.MessagesEditMessage(context.Background(), &tg.MessagesEditMessageRequest{
-				Peer:        peerCopy,
-				ID:          msgID,
-				ReplyMarkup: &tg.ReplyKeyboardHide{},
-			})
-			cache.DeleteAudio(data.ID)
-		}(peer, videoMsgID)
-	} else if data.AudioURL != "" && data.ID != "" {
-		go func(videoID string) {
-			time.Sleep(2 * time.Minute)
-			cache.DeleteAudio(videoID)
-		}(data.ID)
-	}
-
-	return nil
 }
 
-// kirimAlbumStream (private) tetap menggunakan SendPhotoAlbumStream
-func kirimAlbumStream(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, title string, imageURLs []string, logger *zap.Logger) error {
+// kirimAlbumStream dengan support replyTo untuk grup
+func kirimAlbumStream(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, title string, imageURLs []string, replyTo *tg.InputReplyToMessage, logger *zap.Logger) error {
 	if len(imageURLs) == 0 {
 		return nil
 	}
@@ -338,6 +271,7 @@ func kirimAlbumStream(ctx context.Context, client *tg.Client, peer tg.InputPeerC
 				continue
 			}
 
+			// Convert WebP ke JPEG
 			if len(body) >= 12 && string(body[0:4]) == "RIFF" && string(body[8:12]) == "WEBP" {
 				img, _, err := image.Decode(bytes.NewReader(body))
 				if err != nil {
@@ -366,7 +300,7 @@ func kirimAlbumStream(ctx context.Context, client *tg.Client, peer tg.InputPeerC
 			continue
 		}
 
-		if err := mediaSender.SendPhotoAlbumStream(ctx, peer, readers, filenames, captions, nil); err != nil {
+		if err := mediaSender.SendPhotoAlbumStream(ctx, peer, readers, filenames, captions, replyTo); err != nil {
 			logger.Error("Gagal kirim album batch", zap.Int("batch", batchIdx), zap.Error(err))
 		}
 

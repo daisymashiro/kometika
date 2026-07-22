@@ -20,9 +20,8 @@ import (
 )
 
 const (
-	defaultStreamTimeout = 0 * time.Minute
+	defaultStreamTimeout = 10 * time.Minute // Ubah dari 0 menjadi 10 menit
 	defaultHeadTimeout   = 1 * time.Minute
-	effectivelyNoTimeout = 40 * 24 * time.Hour
 )
 
 // contextBody memastikan cancel() terpanggil saat stream ditutup.
@@ -81,7 +80,7 @@ func NewVideoClientWithTimeout(profile string, log *zap.Logger, streamTimeout ti
 	}
 
 	c := client.NewClient(profile,
-		client.WithTimeout(effectivelyNoTimeout),
+		client.WithTimeout(streamTimeout), // Gunakan timeout yang wajar
 		client.WithRetry(0),
 	)
 

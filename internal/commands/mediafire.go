@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/gotd/td/telegram/message"
-	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 	"go.uber.org/zap"
 
 	"mybot/internal/api"
 	"mybot/internal/api/mediafire"
+	"mybot/internal/assets"
+	"mybot/internal/config"
 	"mybot/internal/log"
 	"mybot/internal/media"
 )
@@ -25,6 +26,13 @@ func isMediaFireURL(raw string) bool {
 
 // HandleMediaFire otomatis dipanggil saat URL MediaFire terdeteksi di private chat
 func HandleMediaFire(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string, logger *zap.Logger) error {
+	// Cek feature toggle
+	fm := config.GetFeatureManager()
+	if !fm.IsEnabled("mediafire") {
+		logger.Info("Fitur MediaFire dinonaktifkan")
+		return nil
+	}
+
 	if !isMediaFireURL(url) {
 		return nil
 	}
@@ -60,7 +68,9 @@ func HandleMediaFire(ctx context.Context, client *tg.Client, msg *tg.Message, en
 			}
 			go func() {
 				time.Sleep(1 * time.Second)
-				_, _ = client.MessagesDeleteMessages(context.Background(), &tg.MessagesDeleteMessagesRequest{
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_, _ = client.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{
 					Revoke: true,
 					ID:     []int{progressMsgID},
 				})
@@ -160,22 +170,16 @@ func sendMediaFireFile(ctx context.Context, client *tg.Client, peer tg.InputPeer
 
 	var thumbFile tg.InputFileClass
 
-	defaultThumbURL := "https://4kwallpapers.com/images/wallpapers/kawaii-cat-girl-5120x2880-26545.png"
-
-	thumbBytes, err := api.GetThumbnail(ctx, defaultThumbURL)
-	if err == nil && len(thumbBytes) > 0 {
-		up := uploader.NewUploader(client).WithThreads(1)
-		thumbFile, err = up.FromBytes(ctx, "default_thumb.jpg", thumbBytes)
-		if err != nil {
-			logger.Warn("Gagal upload thumbnail default", zap.Error(err))
-		} else {
-			logger.Info("Thumbnail default berhasil disiapkan")
-		}
+	// Gunakan embedded thumbnail
+	mediaSender := media.NewMediaSender(client)
+	uploadedThumb, err := mediaSender.UploadThumbnail(ctx, assets.DefaultThumbnail)
+	if err == nil {
+		thumbFile = uploadedThumb
+		logger.Info("Thumbnail default embedded berhasil disiapkan")
 	} else {
-		logger.Warn("Gagal download thumbnail default", zap.Error(err))
+		logger.Warn("Gagal upload thumbnail default embedded", zap.Error(err))
 	}
 
-	mediaSender := media.NewMediaSender(client)
 	_, err = mediaSender.SendDynamicStream(
 		ctx,
 		peer,
@@ -185,7 +189,7 @@ func sendMediaFireFile(ctx context.Context, client *tg.Client, peer tg.InputPeer
 		caption,
 		nil, // replyMarkup
 		replyTo,
-		thumbFile, // thumbnail default atau nil jika gagal
+		thumbFile,
 	)
 	return err
 }

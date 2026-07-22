@@ -14,12 +14,20 @@ import (
 
 	"mybot/internal/api"
 	"mybot/internal/api/twiter"
+	"mybot/internal/config"
 	"mybot/internal/log"
 	"mybot/internal/media"
 )
 
 // HandleTwitter adalah entry point utama untuk tautan Twitter/X.
 func HandleTwitter(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string, logger *zap.Logger) error {
+	// Cek feature toggle
+	fm := config.GetFeatureManager()
+	if !fm.IsEnabled("twitter") {
+		logger.Info("Fitur Twitter dinonaktifkan")
+		return nil
+	}
+
 	lowerURL := strings.ToLower(url)
 
 	// Validasi domain Twitter

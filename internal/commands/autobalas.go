@@ -198,7 +198,7 @@ Tujuan utama kamu adalah membuat pengguna merasa dihargai dan diperhatikan, sert
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Second} // Gemini mungkin lebih lambat, beri timeout lebih longgar
+	client := &http.Client{Timeout: 45 * time.Second} // Gemini mungkin lebih lambat, beri timeout lebih longgar
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("gagal panggil Gemini: %w", err)

@@ -8,10 +8,10 @@ import (
 
 	"mybot/internal/api"
 	"mybot/internal/api/lulustream"
+	"mybot/internal/config"
 	"mybot/internal/log"
 	"mybot/internal/media"
 
-	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 	"go.uber.org/zap"
@@ -27,71 +27,57 @@ func extractLuluID(link string) string {
 }
 
 func HandleLulustream(ctx context.Context, tgClient *tg.Client, msg *tg.Message, entities tg.Entities, url string, logger *zap.Logger) error {
-	peer, err := GetPeerFromMessage(ctx, tgClient, msg, entities)
-	if err != nil || peer == nil {
-		logger.Error("Gagal dapatkan peer untuk Lulustream", zap.Error(err))
-		log.LogError(ctx, "LulustreamGetPeer", err, "url="+url)
-		return err
+	// Cek feature toggle
+	fm := config.GetFeatureManager()
+	if !fm.IsEnabled("lulustream") {
+		logger.Info("Fitur Lulustream dinonaktifkan")
+		return nil
 	}
 
-	msgSender := message.NewSender(tgClient)
-	mediaSender := media.NewMediaSender(tgClient)
+	// Gunakan middleware WithLoading
+	return WithLoading(ctx, tgClient, msg, entities, "Lulustream", logger, func(ctx context.Context, lc *LoadingContext) error {
+		return processLulustream(ctx, tgClient, lc, url, logger)
+	})
+}
 
-	var replyTo *tg.InputReplyToMessage
-	if _, isPrivate := msg.PeerID.(*tg.PeerUser); !isPrivate {
-		topicID := getTopicID(msg)
-		replyTo = buildReplyTo(msg.ID, topicID)
-	}
+func processLulustream(ctx context.Context, tgClient *tg.Client, lc *LoadingContext, url string, logger *zap.Logger) error {
 	logger.Info("Menerima request LuluStream", zap.String("url", url))
 
-	var progressMsgID int
-	if replyTo != nil {
-		reqProgress := &tg.MessagesSendMessageRequest{
-			Peer:     peer,
-			Message:  "⏳ Memproses LuluStream, mohon tunggu...",
-			RandomID: time.Now().UnixNano(),
-		}
-		reqProgress.SetReplyTo(replyTo)
-		progressUpdates, err := tgClient.MessagesSendMessage(ctx, reqProgress)
-		if err == nil && progressUpdates != nil {
-			progressMsgID, _ = media.ExtractMessageID(progressUpdates)
-		}
-	} else {
-		progressMsg, err := msgSender.To(peer).Reply(msg.ID).Text(ctx, "⏳ Memproses LuluStream, mohon tunggu...")
-		if err == nil {
-			progressMsgID, _ = media.ExtractMessageID(progressMsg)
-		}
-	}
-
-	defer func() {
-		if progressMsgID != 0 {
-			go func() {
-				time.Sleep(1 * time.Second)
-				deleteGroupMessage(context.Background(), tgClient, peer, progressMsgID)
-			}()
-		}
-	}()
+	mediaSender := media.NewMediaSender(tgClient)
 
 	videoID := extractLuluID(url)
 	if videoID == "" {
 		logger.Warn("Gagal extract videoID dari URL", zap.String("url", url))
 		log.LogWarn(ctx, "LulustreamExtractID", "videoID tidak ditemukan", "url="+url)
-		_ = media.SendHTML(ctx, tgClient, peer, "❌ ID Video Lulustream tidak ditemukan.")
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, tgClient, lc.Peer, lc.ProgressMsgID, "❌ ID Video Lulustream tidak ditemukan.", logger)
+		}
 		return nil
 	}
 
 	// ⏱️ Mulai scrape
+	if lc.ProgressMsgID != 0 {
+		_ = EditLoadingMessage(ctx, tgClient, lc.Peer, lc.ProgressMsgID, "🔍 Mengambil informasi video...", logger)
+	}
+
 	startScrape := time.Now()
 	result, httpClient, err := lulustream.Scrape(videoID)
 	logger.Info("Scrape selesai", zap.Duration("durasi", time.Since(startScrape)))
 	if err != nil {
 		logger.Error("Lulustream scrape error", zap.Error(err))
 		log.LogError(ctx, "LulustreamScrape", err, "videoID="+videoID, "url="+url)
-		_ = media.SendHTML(ctx, tgClient, peer, "❌ Gagal mengambil data Lulustream.")
-		return err
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, tgClient, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengambil data Lulustream.", logger)
+		}
+		return nil
 	}
 
 	logger.Info("Scraping berhasil", zap.String("title", result.Title), zap.String("id", videoID))
+	
+	if lc.ProgressMsgID != 0 {
+		_ = EditLoadingMessage(ctx, tgClient, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh video...", logger)
+	}
+
 	var thumbFile tg.InputFileClass
 	if result.Thumbnail != "" {
 		thumbBytes, err := api.GetThumbnail(ctx, result.Thumbnail)
@@ -113,8 +99,10 @@ func HandleLulustream(ctx context.Context, tgClient *tg.Client, msg *tg.Message,
 	if err != nil {
 		logger.Error("Gagal membuka stream video LuluStream", zap.Error(err), zap.String("download_url", result.DownloadURL))
 		log.LogError(ctx, "LulustreamStream", err, "download_url="+result.DownloadURL, "videoID="+videoID)
-		_ = media.SendHTML(ctx, tgClient, peer, "❌ Gagal membuka aliran stream video. Server menolak akses.")
-		return err
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, tgClient, lc.Peer, lc.ProgressMsgID, "❌ Gagal membuka aliran stream video.", logger)
+		}
+		return nil
 	}
 	defer stream.Close()
 
@@ -134,22 +122,25 @@ func HandleLulustream(ctx context.Context, tgClient *tg.Client, msg *tg.Message,
 
 	_, err = mediaSender.SendDynamicStream(
 		ctx,
-		peer,
+		lc.Peer,
 		fullStream,
 		info,
 		filename,
 		caption,
 		nil,
-		replyTo,
+		lc.ReplyTo,
 		thumbFile,
 	)
 
 	if err != nil {
 		logger.Error("Gagal mengirim video LuluStream", zap.Error(err))
 		log.LogError(ctx, "LulustreamUpload", err, "filename="+filename, "videoID="+videoID)
-		_ = media.SendHTML(ctx, tgClient, peer, "❌ Gagal mengirim video ke Telegram.")
-		return err
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, tgClient, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim video ke Telegram.", logger)
+		}
+		return nil
 	}
+
 	logger.Info("Video LuluStream berhasil dikirim", zap.String("video_id", videoID))
 	return nil
 }

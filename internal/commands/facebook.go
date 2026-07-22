@@ -6,12 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"go.uber.org/zap"
 
 	"mybot/internal/api/facebook"
 	"mybot/internal/cache"
+	"mybot/internal/config"
 	"mybot/internal/log"
 	"mybot/internal/media"
 )
@@ -27,57 +28,31 @@ func HandleFacebook(ctx context.Context, client *tg.Client, msg *tg.Message, ent
 		return nil
 	}
 
-	mediaSender := media.NewMediaSender(client)
-
-	// Jika BUKAN private chat -> dialihkan ke group handler khusus
-	if _, ok := msg.PeerID.(*tg.PeerUser); !ok {
-		peer, err := GetPeerFromMessage(ctx, client, msg, entities)
-		if err != nil || peer == nil {
-			return err
-		}
-		topicID := getTopicID(msg)
-		replyTo := buildReplyTo(msg.ID, topicID)
-		return handleFacebookGroup(ctx, client, peer, url, replyTo, logger)
+	// Cek feature toggle
+	fm := config.GetFeatureManager()
+	if !fm.IsEnabled("facebook") {
+		logger.Info("Fitur Facebook dinonaktifkan")
+		return nil
 	}
 
-	// ── PRIVATE CHAT LOGIC ──────────────────────────────────────────────────
-	peer, err := GetPeerFromMessage(ctx, client, msg, entities)
-	if err != nil || peer == nil {
-		logger.Error("Gagal mendapatkan peer private chat", zap.Error(err))
-		log.LogError(ctx, "FacebookGetPeer", err, "url="+url)
-		return err
-	}
+	// Gunakan middleware WithLoading
+	return WithLoading(ctx, client, msg, entities, "Facebook", logger, func(ctx context.Context, lc *LoadingContext) error {
+		return processFacebook(ctx, client, lc, url, logger)
+	})
+}
 
-	msgSender := message.NewSender(client)
+func processFacebook(ctx context.Context, client *tg.Client, lc *LoadingContext, url string, logger *zap.Logger) error {
+	logger.Info("Memproses Facebook", zap.String("url", url))
 
-	// 1. Kirim pesan kemajuan (Loading)
-	progressMsg, err := msgSender.To(peer).Text(ctx, "⏳ Memproses Facebook, mohon tunggu...")
-	if err != nil {
-		logger.Warn("Gagal mengirim pesan progress", zap.Error(err))
-	} else {
-		progressMsgID, _ := media.ExtractMessageID(progressMsg)
-		defer func() {
-			if progressMsgID == 0 {
-				return
-			}
-			go func() {
-				time.Sleep(1 * time.Second)
-				_, _ = client.MessagesDeleteMessages(context.Background(), &tg.MessagesDeleteMessagesRequest{
-					Revoke: true,
-					ID:     []int{progressMsgID},
-				})
-			}()
-		}()
-	}
-
-	logger.Info("Memproses Facebook (Private Chat)", zap.String("url", url))
-
-	// 2. Mengambil data menggunakan sistem fallback
+	// Mengambil data menggunakan sistem fallback
 	data, err := facebook.FetchFacebookWithFallback(logger, url)
 	if err != nil {
 		logger.Warn("Gagal fetch data Facebook", zap.Error(err))
 		log.LogError(ctx, "FacebookFetch", err, "url="+url)
-		_, _ = msgSender.To(peer).Text(ctx, "❌ Gagal mengambil data dari Facebook.")
+		
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengambil data dari Facebook.", logger)
+		}
 		return nil
 	}
 
@@ -87,17 +62,24 @@ func HandleFacebook(ctx context.Context, client *tg.Client, msg *tg.Message, ent
 	}
 
 	if data.VidioURL == "" {
-		_, _ = msgSender.To(peer).Text(ctx, "❌ Tidak ditemukan URL video.")
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Tidak ditemukan URL video.", logger)
+		}
 		return nil
 	}
 
-	// 3. Simpan Audio ke Cache jika tersedia dari scraper
+	// Simpan Audio ke Cache jika tersedia dari scraper
 	if data.AudioURL != "" && data.ID != "" {
 		cache.SetAudio(data.ID, data.AudioURL, data.Title, "Facebook Music")
 		logger.Info("Audio Facebook berhasil disimpan ke cache", zap.String("video_id", data.ID))
 	}
 
-	// 4. Menyusun tombol inline MP3 jika audio URL valid
+	// Update pesan loading
+	if lc.ProgressMsgID != 0 {
+		_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh video...", logger)
+	}
+
+	// Menyusun tombol inline MP3 jika audio URL valid
 	var replyMarkup tg.ReplyMarkupClass
 	if data.AudioURL != "" && data.ID != "" {
 		replyMarkup = &tg.ReplyInlineMarkup{
@@ -114,115 +96,73 @@ func HandleFacebook(ctx context.Context, client *tg.Client, msg *tg.Message, ent
 
 	caption := fmt.Sprintf("📘 %s\n\n@Kometika_bot", title)
 
+	mediaSender := media.NewMediaSender(client)
 	videoMsgUpdates, err := mediaSender.SendSmartMedia(
-		ctx, peer, data.VidioURL, data.CoverURL, caption, replyMarkup, nil,
+		ctx, lc.Peer, data.VidioURL, data.CoverURL, caption, replyMarkup, lc.ReplyTo,
 	)
 	if err != nil {
 		logger.Error("Gagal mengirim video Facebook", zap.Error(err))
-		_, _ = msgSender.To(peer).Text(ctx, "❌ Gagal mengirim video.")
+		log.LogError(ctx, "Facebook.SendVideo", err, "url="+url)
+		
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim video.", logger)
+		}
 		return nil
 	}
 
-	// 6. Siklus pembersihan tombol inline otomatis setelah 2 menit
+	// Siklus pembersihan tombol inline otomatis setelah 2 menit dengan context-aware
 	if replyMarkup != nil && videoMsgUpdates != nil {
 		videoMsgID, err := media.ExtractMessageID(videoMsgUpdates)
 		if err == nil && videoMsgID != 0 {
-			go func(peerCopy tg.InputPeerClass, msgID int) {
-				time.Sleep(2 * time.Minute)
-				_, _ = client.MessagesEditMessage(context.Background(), &tg.MessagesEditMessageRequest{
-					Peer:        peerCopy,
-					ID:          msgID,
-					ReplyMarkup: &tg.ReplyKeyboardHide{},
-				})
-				cache.DeleteAudio(data.ID)
-				logger.Info("Tombol audio Facebook dihapus otomatis", zap.Int("msg_id", msgID))
-			}(peer, videoMsgID)
+			go scheduleFacebookAudioButtonCleanup(client, lc.Peer, videoMsgID, data.ID, logger)
 		} else {
-			go func(videoID string) {
-				time.Sleep(2 * time.Minute)
-				cache.DeleteAudio(videoID)
-			}(data.ID)
+			go scheduleAudioCacheCleanup(data.ID)
 		}
 	}
 
-	logger.Info("Video Facebook sukses terkirim (Private)", zap.String("video_id", data.ID))
+	logger.Info("Video Facebook sukses terkirim", zap.String("video_id", data.ID))
 	return nil
 }
 
-// handleFacebookGroup menangani pemrosesan tautan Facebook di Group / Supergroup.
-func handleFacebookGroup(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, url string, replyTo *tg.InputReplyToMessage, logger *zap.Logger) error {
-	logger.Info("Memproses Facebook (Group Chat)", zap.String("url", url))
+// scheduleFacebookAudioButtonCleanup dengan context-aware cleanup
+func scheduleFacebookAudioButtonCleanup(client *tg.Client, peer tg.InputPeerClass, msgID int, videoID string, logger *zap.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
 
-	mediaSender := media.NewMediaSender(client)
+	select {
+	case <-time.After(2 * time.Minute):
+		editCtx, editCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer editCancel()
 
-	data, err := facebook.FetchFacebookWithFallback(logger, url)
-	if err != nil {
-		logger.Warn("Gagal fetch data Facebook grup", zap.Error(err))
-		sendGroupText(ctx, client, peer, "❌ Gagal mengambil data dari Facebook.", replyTo)
-		return nil
-	}
-
-	title := data.Title
-	if len(title) > 400 {
-		title = title[:400] + "..."
-	}
-
-	if data.VidioURL == "" {
-		sendGroupText(ctx, client, peer, "❌ Tidak ditemukan URL video.", replyTo)
-		return nil
-	}
-
-	if data.AudioURL != "" && data.ID != "" {
-		cache.SetAudio(data.ID, data.AudioURL, data.Title, "Facebook Music")
-		logger.Info("Audio Facebook disimpan ke cache (Group)", zap.String("video_id", data.ID))
-	}
-
-	var replyMarkup tg.ReplyMarkupClass
-	if data.AudioURL != "" && data.ID != "" {
-		replyMarkup = &tg.ReplyInlineMarkup{
-			Rows: []tg.KeyboardButtonRow{
-				{Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonCallback{
-						Text: "🎵 Unduh Audio (MP3)",
-						Data: []byte(fmt.Sprintf("mp3_%s", data.ID)),
-					},
-				}},
-			},
-		}
-	}
-
-	caption := fmt.Sprintf("📘 %s\n\n@Kometika_bot", title)
-
-	// 🚀 MENGGUNAKAN SMART PIPELINE BARU DI GROUP (Dengan parameter replyTo)
-	videoMsgUpdates, err := mediaSender.SendSmartMedia(
-		ctx, peer, data.VidioURL, data.CoverURL, caption, replyMarkup, replyTo,
-	)
-	if err != nil {
-		logger.Error("Gagal mengirim video Facebook di grup", zap.Error(err))
-		sendGroupText(ctx, client, peer, "❌ Gagal mengirim video.", replyTo)
-		return nil
-	}
-
-	if replyMarkup != nil && videoMsgUpdates != nil {
-		videoMsgID, err := media.ExtractMessageID(videoMsgUpdates)
-		if err == nil && videoMsgID != 0 {
-			go func(peerCopy tg.InputPeerClass, msgID int) {
-				time.Sleep(2 * time.Minute)
-				_, _ = client.MessagesEditMessage(context.Background(), &tg.MessagesEditMessageRequest{
-					Peer:        peerCopy,
-					ID:          msgID,
-					ReplyMarkup: &tg.ReplyKeyboardHide{},
-				})
-				cache.DeleteAudio(data.ID)
-			}(peer, videoMsgID)
-		} else {
-			go func(videoID string) {
-				time.Sleep(2 * time.Minute)
+		for {
+			_, err := client.MessagesEditMessage(editCtx, &tg.MessagesEditMessageRequest{
+				Peer:        peer,
+				ID:          msgID,
+				ReplyMarkup: &tg.ReplyKeyboardHide{},
+			})
+			if err != nil {
+				if d, ok := tgerr.AsFloodWait(err); ok {
+					logger.Warn("FloodWait saat hapus tombol audio Facebook", zap.Duration("wait", d))
+					select {
+					case <-time.After(d + time.Second):
+						continue
+					case <-editCtx.Done():
+						logger.Warn("Gagal menghapus tombol audio Facebook (timeout)", zap.Int("msg_id", msgID))
+						cache.DeleteAudio(videoID)
+						return
+					}
+				}
+				logger.Warn("Gagal menghapus tombol audio Facebook", zap.Int("msg_id", msgID), zap.Error(err))
 				cache.DeleteAudio(videoID)
-			}(data.ID)
+				return
+			}
+			break
 		}
-	}
 
-	logger.Info("Video Facebook berhasil terkirim ke grup", zap.String("video_id", data.ID))
-	return nil
+		cache.DeleteAudio(videoID)
+		logger.Info("Tombol audio Facebook dihapus otomatis", zap.Int("msg_id", msgID))
+
+	case <-ctx.Done():
+		cache.DeleteAudio(videoID)
+	}
 }

@@ -220,7 +220,7 @@ func processGuestInstagram(ctx context.Context, client *tg.Client, inlineMsgID t
 		}
 		return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
 	}
-	return fmt.Errorf("tidak ada media ditemukan")
+	return fmt.Errorf("tidak ada media")
 }
 
 func processGuestFacebook(ctx context.Context, client *tg.Client, inlineMsgID tg.InputBotInlineMessageIDClass, url string, logger *zap.Logger) error {
@@ -270,9 +270,7 @@ func processGuestTwitter(ctx context.Context, client *tg.Client, inlineMsgID tg.
 		editGuestInlineText(ctx, client, inlineMsgID, "❌ Album tidak didukung di Guest Mode.")
 		return nil
 	}
-
 	editGuestInlineText(ctx, client, inlineMsgID, "📥 Mengunduh media...")
-	// Coba video dulu
 	info := api.ContentTypeInfo{
 		MimeType:  "video/mp4",
 		Category:  api.ContentVideo,
@@ -313,8 +311,7 @@ func processGuestTwitter(ctx context.Context, client *tg.Client, inlineMsgID tg.
 	return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
 }
 
-// --- Upload ke cache dengan retry ---
-
+// uploadMediaToCacheWithRetry dengan context-aware retry (FIXED)
 func uploadMediaToCacheWithRetry(ctx context.Context, client *tg.Client, mediaURL string, info api.ContentTypeInfo, filename, thumbURL string, maxRetries int) (int64, int64, []byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -323,11 +320,21 @@ func uploadMediaToCacheWithRetry(ctx context.Context, client *tg.Client, mediaUR
 			return fileID, accessHash, fileRef, nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		
+		// Context-aware sleep menggunakan select
+		retryDelay := time.Duration(attempt) * 500 * time.Millisecond
+		select {
+		case <-time.After(retryDelay):
+			// Lanjutkan retry
+		case <-ctx.Done():
+			// Context dibatalkan, hentikan retry
+			return 0, 0, nil, ctx.Err()
+		}
 	}
 	return 0, 0, nil, fmt.Errorf("setelah %d percobaan: %w", maxRetries, lastErr)
 }
 
+// uploadImageToCacheWithRetry dengan context-aware retry (FIXED)
 func uploadImageToCacheWithRetry(ctx context.Context, client *tg.Client, imageURL string, maxRetries int) (int64, int64, []byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -336,7 +343,16 @@ func uploadImageToCacheWithRetry(ctx context.Context, client *tg.Client, imageUR
 			return fileID, accessHash, fileRef, nil
 		}
 		lastErr = err
-		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+		
+		// Context-aware sleep menggunakan select
+		retryDelay := time.Duration(attempt) * 500 * time.Millisecond
+		select {
+		case <-time.After(retryDelay):
+			// Lanjutkan retry
+		case <-ctx.Done():
+			// Context dibatalkan, hentikan retry
+			return 0, 0, nil, ctx.Err()
+		}
 	}
 	return 0, 0, nil, fmt.Errorf("setelah %d percobaan: %w", maxRetries, lastErr)
 }
@@ -349,11 +365,6 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 	}
 	defer stream.Close()
 
-	if info.MimeType == "" {
-		info.MimeType = "application/octet-stream"
-		info.Category = api.ContentDocument
-	}
-
 	peer := getCachePeer()
 	if peer == nil {
 		var err2 error
@@ -364,65 +375,50 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 	}
 
 	up := uploader.NewUploader(client).WithThreads(1)
-
-	// Upload file utama
 	file, err := up.FromReader(ctx, filename, stream)
 	if err != nil {
 		return 0, 0, nil, err
 	}
 
-	// === Upload Thumbnail jika ada ===
 	var thumbFile tg.InputFileClass
 	if thumbURL != "" {
 		thumbBytes, err := api.GetThumbnail(ctx, thumbURL)
 		if err == nil && len(thumbBytes) > 0 {
-			converted, err := media.ProcessAndValidateImageBytes(bytes.NewReader(thumbBytes), nil)
-			if err == nil && len(converted) > 0 {
-				thumbBytes = converted
-			}
-			thumbFile, err = up.FromBytes(ctx, "thumb_file_guest_mode.jpg", thumbBytes)
-			if err != nil {
-				log.LogWarn(ctx, "GuestUploadThumb", "Gagal upload thumbnail", "error="+err.Error())
-				thumbFile = nil
-			}
+			thumbFile, _ = up.FromBytes(ctx, "thumb.jpg", thumbBytes)
 		}
 	}
 
-	// === BUILD ATTRIBUTES ===
-	var attrs []tg.DocumentAttributeClass
-	attrs = append(attrs, &tg.DocumentAttributeFilename{FileName: filename})
+	doc := &tg.InputMediaUploadedDocument{
+		File:     file,
+		MimeType: info.MimeType,
+	}
+	if thumbFile != nil {
+		doc.SetThumb(thumbFile)
+	}
 
+	var attrs []tg.DocumentAttributeClass
 	switch info.Category {
 	case api.ContentVideo:
-		attrs = append(attrs, &tg.DocumentAttributeVideo{
-			Duration:          (48 * time.Hour).Seconds(),
-			W:                 0,
-			H:                 0,
-			SupportsStreaming: info.MimeType == "video/mp4", // Tambahan flag
-		})
+		videoAttr := &tg.DocumentAttributeVideo{}
+		if info.MimeType == "video/mp4" {
+			videoAttr.SupportsStreaming = true
+		}
+		attrs = append(attrs, videoAttr)
 	case api.ContentAudio:
 		attrs = append(attrs, &tg.DocumentAttributeAudio{})
 	}
+	attrs = append(attrs, &tg.DocumentAttributeFilename{FileName: filename})
+	doc.Attributes = attrs
 
-	// === BUILD MEDIA ===
-	mediaUpload := &tg.InputMediaUploadedDocument{
-		File:       file,
-		MimeType:   info.MimeType,
-		Attributes: attrs,
-	}
-	if thumbFile != nil {
-		mediaUpload.SetThumb(thumbFile)
-	}
-
-	randID, err := media.RandomID() // Menggunakan media.RandomID()
+	randID, err := media.RandomID()
 	if err != nil {
 		return 0, 0, nil, err
 	}
 
 	req := &tg.MessagesSendMediaRequest{
 		Peer:     peer,
-		Media:    mediaUpload,
-		Message:  "temp-cache",
+		Media:    doc,
+		Message:  "temp",
 		RandomID: randID,
 	}
 	updates, err := client.MessagesSendMedia(ctx, req)
@@ -430,7 +426,6 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 		return 0, 0, nil, err
 	}
 
-	// Ekstrak document ID, AccessHash, dan FileReference
 	switch v := updates.(type) {
 	case *tg.Updates:
 		for _, update := range v.Updates {

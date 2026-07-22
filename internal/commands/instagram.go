@@ -10,11 +10,13 @@ import (
 
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"go.uber.org/zap"
 
 	"mybot/internal/api"
 	"mybot/internal/api/instagram"
 	"mybot/internal/cache"
+	"mybot/internal/config"
 	"mybot/internal/log"
 	"mybot/internal/media"
 )
@@ -36,81 +38,58 @@ func HandleInstagram(
 		return nil
 	}
 
-	peer, err := GetPeerFromMessage(ctx, client, msg, entities)
-	if err != nil || peer == nil {
-		logger.Error("Gagal dapatkan peer Instagram", zap.Error(err))
-		log.LogError(ctx, "Instagram.GetPeer", err, "url="+url)
-		return err
+	// Cek feature toggle
+	fm := config.GetFeatureManager()
+	if !fm.IsEnabled("instagram") {
+		logger.Info("Fitur Instagram dinonaktifkan")
+		return nil
 	}
 
-	// Kalau bukan private chat, proses sebagai group/supergroup.
-	if _, ok := msg.PeerID.(*tg.PeerUser); !ok {
-		topicID := getTopicID(msg)
-		replyTo := buildReplyTo(msg.ID, topicID)
-
-		return handleInstagramGroup(ctx, client, peer, url, replyTo, logger)
-	}
-
-	// Private chat.
-	return handleInstagramCommon(ctx, client, peer, url, nil, logger)
+	// Gunakan middleware WithLoading
+	return WithLoading(ctx, client, msg, entities, "Instagram", logger, func(ctx context.Context, lc *LoadingContext) error {
+		return processInstagram(ctx, client, lc, url, logger)
+	})
 }
 
-func handleInstagramGroup(
+func processInstagram(
 	ctx context.Context,
 	client *tg.Client,
-	peer tg.InputPeerClass,
+	lc *LoadingContext,
 	url string,
-	replyTo *tg.InputReplyToMessage,
 	logger *zap.Logger,
 ) error {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-
-	return handleInstagramCommon(ctx, client, peer, url, replyTo, logger)
-}
-
-func handleInstagramCommon(
-	ctx context.Context,
-	client *tg.Client,
-	peer tg.InputPeerClass,
-	url string,
-	replyTo *tg.InputReplyToMessage,
-	logger *zap.Logger,
-) error {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-
 	logger.Info("Memproses Instagram", zap.String("url", url))
-	//log.LogInfo(ctx, "Memproses Instagram\nURL: "+url)
 
 	data, err := instagram.FetchInstagramDataWithFallback(url)
 	if err != nil {
 		logger.Error("Gagal fetch data Instagram", zap.Error(err))
 		log.LogError(ctx, "Instagram.FetchInstagramDataWithFallback", err, "url="+url)
 
-		sendInstagramText(ctx, client, peer, "❌ Gagal mengambil data Instagram.", replyTo, logger)
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengambil data Instagram.", logger)
+		}
 		return nil
 	}
 
 	title := trimInstagramTitle(data.Title)
 
-	// Prioritaskan video.
-	// Banyak API Instagram kadang mengisi ImageURLs dengan cover video.
-	// Kalau foto diproses duluan, bisa salah kirim cover sebagai foto.
+	// Prioritaskan video
 	if data.VideoURL != "" {
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh video...", logger)
+		}
+
 		err := sendInstagramVideo(
 			ctx,
 			client,
-			peer,
+			lc.Peer,
 			data.VideoURL,
 			data.AudioURL,
 			data.CoverURL,
 			data.ID,
 			data.Title,
 			title,
-			replyTo,
+			lc.ReplyTo,
 			logger,
 		)
 		if err != nil {
@@ -124,23 +103,29 @@ func handleInstagramCommon(
 				"id="+data.ID,
 			)
 
-			sendInstagramText(ctx, client, peer, "❌ Gagal mengirim video.", replyTo, logger)
+			if lc.ProgressMsgID != 0 {
+				_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim video.", logger)
+			}
 			return nil
 		}
 
 		return nil
 	}
 
-	// Kalau tidak ada video, proses foto.
+	// Proses foto
 	switch {
 	case len(data.ImageURLs) == 1:
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh foto...", logger)
+		}
+
 		err := sendInstagramSinglePhoto(
 			ctx,
 			client,
-			peer,
+			lc.Peer,
 			data.ImageURLs[0],
 			title,
-			replyTo,
+			lc.ReplyTo,
 			logger,
 		)
 		if err != nil {
@@ -153,19 +138,20 @@ func handleInstagramCommon(
 				"image_url="+data.ImageURLs[0],
 			)
 
-			sendInstagramText(ctx, client, peer, "❌ Gagal mengirim foto ke Telegram.", replyTo, logger)
+			if lc.ProgressMsgID != 0 {
+				_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim foto ke Telegram.", logger)
+			}
 			return nil
 		}
 
 		return nil
 
 	case len(data.ImageURLs) > 1:
-		if replyTo != nil {
-			err = kirimAlbumStreamGroup(ctx, client, peer, title, data.ImageURLs, replyTo, logger)
-		} else {
-			err = kirimAlbumStream(ctx, client, peer, title, data.ImageURLs, logger)
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh album...", logger)
 		}
 
+		err = kirimAlbumStreamInstagram(ctx, client, lc.Peer, title, data.ImageURLs, lc.ReplyTo, logger)
 		if err != nil {
 			logger.Error("Gagal kirim album Instagram", zap.Error(err))
 			log.LogError(
@@ -176,7 +162,9 @@ func handleInstagramCommon(
 				fmt.Sprintf("image_count=%d", len(data.ImageURLs)),
 			)
 
-			sendInstagramText(ctx, client, peer, "❌ Gagal mengirim album foto.", replyTo, logger)
+			if lc.ProgressMsgID != 0 {
+				_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim album foto.", logger)
+			}
 			return nil
 		}
 
@@ -187,7 +175,9 @@ func handleInstagramCommon(
 		logger.Warn(warnMsg, zap.String("url", url))
 		log.LogWarn(ctx, "Instagram.NoMedia", warnMsg, "url="+url)
 
-		sendInstagramText(ctx, client, peer, "❌ Tidak ada media yang dapat diproses.", replyTo, logger)
+		if lc.ProgressMsgID != 0 {
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Tidak ada media yang dapat diproses.", logger)
+		}
 		return nil
 	}
 }
@@ -207,49 +197,66 @@ func sendInstagramSinglePhoto(
 	}
 	defer stream.Close()
 
-	// Convert ke JPEG standar yang ramah MTProto.
 	photoReader, err := media.ProcessAndValidateImage(stream, logger)
 	if err != nil {
 		return fmt.Errorf("gagal proses/konversi foto Instagram: %w", err)
 	}
 
-	// Ambil bytes foto ke RAM
 	photoBytes, err := io.ReadAll(photoReader)
 	if err != nil {
-		return fmt.Errorf("gagal membaca buffer foto ke RAM: %w", err)
+		return fmt.Errorf("gagal baca foto Instagram: %w", err)
 	}
 
-	logger.Info("Mengunggah foto Instagram langsung dari RAM bytes", zap.Int("bytes", len(photoBytes)))
-
-	// 1. Buat instance uploader bawaan gotd (seperti yang Anda pakai di thumbnail video)
+	mediaSender := media.NewMediaSender(client)
 	up := uploader.NewUploader(client).WithThreads(1)
 
-	// 2. Upload langsung dari slice bytes RAM
-	uploadedFile, err := up.FromBytes(ctx, "instagram.jpg", photoBytes)
+	file, err := up.FromBytes(ctx, "instagram.jpg", photoBytes)
 	if err != nil {
-		return fmt.Errorf("gagal upload raw bytes ke Telegram: %w", err)
+		return fmt.Errorf("gagal upload foto Instagram: %w", err)
 	}
 
-	caption := fmt.Sprintf("📸 %s\n\n@Kometika_bot", title)
+	uploadedMedia, err := mediaSender.UploadPhotoForReuse(ctx, peer, file)
+	if err != nil {
+		return fmt.Errorf("gagal registrasi foto Instagram: %w", err)
+	}
 
-	// 3. Daftarkan file yang sudah terupload sebagai input media foto
+	caption := fmt.Sprintf("📷 %s\n\n@Kometika_bot", title)
+
+	randID, err := media.RandomID()
+	if err != nil {
+		return fmt.Errorf("gagal generate random ID: %w", err)
+	}
+
 	req := &tg.MessagesSendMediaRequest{
 		Peer:     peer,
-		Media:    &tg.InputMediaUploadedPhoto{File: uploadedFile},
+		Media:    uploadedMedia,
 		Message:  caption,
-		RandomID: time.Now().UnixNano(),
+		RandomID: randID,
 	}
 
 	if replyTo != nil {
 		req.SetReplyTo(replyTo)
 	}
 
-	// 4. Kirim ke Telegram
-	_, err = client.MessagesSendMedia(ctx, req)
-	if err != nil {
-		return fmt.Errorf("gagal mengeksekusi MessagesSendMedia: %w", err)
+	// FloodWait handling
+	for {
+		_, err = client.MessagesSendMedia(ctx, req)
+		if err != nil {
+			if d, ok := tgerr.AsFloodWait(err); ok {
+				logger.Warn("FloodWait saat kirim foto Instagram", zap.Duration("wait", d))
+				select {
+				case <-time.After(d + time.Second):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return fmt.Errorf("gagal kirim foto Instagram: %w", err)
+		}
+		break
 	}
 
+	logger.Info("Foto Instagram berhasil dikirim")
 	return nil
 }
 
@@ -262,59 +269,38 @@ func sendInstagramVideo(
 	coverURL string,
 	videoID string,
 	rawTitle string,
-	captionTitle string,
+	title string,
 	replyTo *tg.InputReplyToMessage,
 	logger *zap.Logger,
 ) error {
 	if audioURL != "" && videoID != "" {
 		cache.SetAudio(videoID, audioURL, rawTitle, "Instagram Music")
-
-		logger.Info("Audio Instagram disimpan ke cache", zap.String("id", videoID))
-		//log.LogInfo(ctx, fmt.Sprintf( "Audio Instagram disimpan ke cache\nID: %s\nSource: Instagram Music", videoID,),)
+		logger.Info("Audio Instagram disimpan ke cache", zap.String("video_id", videoID))
 	}
 
 	stream, _, err := api.GetVideoStream(ctx, videoURL)
 	if err != nil {
 		return fmt.Errorf("gagal buka stream video Instagram: %w", err)
 	}
+	defer stream.Close()
 
-	info, fullStream, closeStream, err := detectInstagramVideoStream(ctx, stream, videoURL, logger)
-	if closeStream != nil {
-		defer closeStream()
-	}
+	info, fullStream, cleanupFn, err := detectInstagramContentWithFallback(ctx, logger, videoURL, stream)
 	if err != nil {
 		return err
 	}
-
-	if info.Category != api.ContentVideo {
-		return fmt.Errorf(
-			"URL video tidak mengembalikan video valid: mime=%s category=%s",
-			info.MimeType,
-			info.Category,
-		)
+	if cleanupFn != nil {
+		defer cleanupFn()
 	}
-
-	if info.MimeType == "" {
-		info.MimeType = "video/mp4"
-	}
-
-	ext := info.Extension
-	if ext == "" {
-		ext = ".mp4"
-	}
-
-	fileID := safeInstagramFileID(videoID)
-	filename := fmt.Sprintf("instagram_%s%s", fileID, ext)
 
 	thumbFile := uploadInstagramVideoThumb(ctx, client, coverURL, logger)
 
 	replyMarkup := buildInstagramAudioButton(audioURL, videoID)
 
-	caption := fmt.Sprintf("📽️ %s\n\n@Kometika_bot", captionTitle)
+	caption := fmt.Sprintf("🎬 %s\n\n@Kometika_bot", title)
+	filename := fmt.Sprintf("%s.mp4", safeInstagramFileID(videoID))
 
 	mediaSender := media.NewMediaSender(client)
-
-	videoMsgUpdates, err := mediaSender.SendDynamicStream(
+	updates, err := mediaSender.SendDynamicStream(
 		ctx,
 		peer,
 		fullStream,
@@ -329,45 +315,33 @@ func sendInstagramVideo(
 		return fmt.Errorf("gagal kirim video Instagram: %w", err)
 	}
 
-	if replyMarkup != nil && videoID != "" {
-		scheduleInstagramAudioButtonCleanup(client, peer, videoMsgUpdates, videoID, logger)
+	if replyMarkup != nil && updates != nil {
+		scheduleInstagramAudioButtonCleanup(client, peer, updates, videoID, logger)
 	}
 
+	logger.Info("Video Instagram berhasil dikirim", zap.String("video_id", videoID))
 	return nil
 }
 
-func detectInstagramVideoStream(
+func detectInstagramContentWithFallback(
 	ctx context.Context,
-	stream interface {
-		Read([]byte) (int, error)
-		Close() error
-	},
-	videoURL string,
 	logger *zap.Logger,
-) (api.ContentTypeInfo, interface {
-	Read([]byte) (int, error)
-}, func(), error) {
+	videoURL string,
+	stream io.ReadCloser,
+) (api.ContentTypeInfo, io.Reader, func(), error) {
 	info, fullStream, err := api.DetectAndClassifyStream(stream)
 	if err == nil {
-		return info, fullStream, func() {
-			_ = stream.Close()
-		}, nil
+		return info, fullStream, nil, nil
 	}
 
-	// Penting untuk zero disk:
-	// Kalau DetectAndClassifyStream gagal, stream bisa sudah terbaca sebagian.
-	// Jangan upload stream yang sama karena bisa terpotong/korup.
-	// Solusi: close lalu fetch ulang dari URL.
-	logger.Warn("Gagal deteksi tipe konten video, fetch ulang dan fallback ke video/mp4", zap.Error(err))
+	logger.Warn("Gagal deteksi tipe konten Instagram, fallback ke video/mp4", zap.Error(err))
 	log.LogWarn(
 		ctx,
-		"Instagram.DetectVideoContent",
-		"Gagal deteksi tipe konten video, mencoba fetch ulang dan fallback ke video/mp4",
+		"Instagram.DetectContentFallback",
+		"Gagal deteksi tipe konten, fallback ke video/mp4",
 		"video_url="+videoURL,
 		"error="+err.Error(),
 	)
-
-	_ = stream.Close()
 
 	stream2, _, err2 := api.GetVideoStream(ctx, videoURL)
 	if err2 != nil {
@@ -410,8 +384,6 @@ func uploadInstagramVideoThumb(
 		return nil
 	}
 
-	// Karena kamu sudah punya converter image sendiri.
-	// Ini tetap zero disk.
 	convertedThumbReader, err := media.ProcessAndValidateImage(bytes.NewReader(thumbBytes), logger)
 	if err != nil {
 		logger.Warn("Gagal convert thumbnail Instagram ke JPEG, mencoba upload thumbnail asli", zap.Error(err))
@@ -475,81 +447,73 @@ func scheduleInstagramAudioButtonCleanup(
 ) {
 	videoMsgID, err := media.ExtractMessageID(updates)
 	if err != nil || videoMsgID == 0 {
-		go func() {
-			time.Sleep(2 * time.Minute)
-			cache.DeleteAudio(videoID)
-		}()
-
+		go scheduleAudioCacheCleanup(videoID)
 		return
 	}
 
 	go func(peerCopy tg.InputPeerClass, msgID int, id string) {
-		time.Sleep(2 * time.Minute)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 
-		_, err := client.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
-			Peer:        peerCopy,
-			ID:          msgID,
-			ReplyMarkup: &tg.ReplyKeyboardHide{},
-		})
-		if err != nil {
-			logger.Warn(
-				"Gagal menghapus tombol audio Instagram",
+		select {
+		case <-time.After(2 * time.Minute):
+			editCtx, editCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer editCancel()
+
+			for {
+				_, err := client.MessagesEditMessage(editCtx, &tg.MessagesEditMessageRequest{
+					Peer:        peerCopy,
+					ID:          msgID,
+					ReplyMarkup: &tg.ReplyKeyboardHide{},
+				})
+				if err != nil {
+					if d, ok := tgerr.AsFloodWait(err); ok {
+						logger.Warn("FloodWait saat hapus tombol audio Instagram", zap.Duration("wait", d))
+						select {
+						case <-time.After(d + time.Second):
+							continue
+						case <-editCtx.Done():
+							logger.Warn("Gagal menghapus tombol audio Instagram (timeout)", zap.Int("msg_id", msgID))
+							cache.DeleteAudio(id)
+							return
+						}
+					}
+
+					logger.Warn(
+						"Gagal menghapus tombol audio Instagram",
+						zap.Int("msg_id", msgID),
+						zap.Error(err),
+					)
+
+					log.LogWarn(
+						editCtx,
+						"Instagram.AudioButtonCleanup",
+						"Gagal menghapus tombol audio Instagram",
+						fmt.Sprintf("msg_id=%d", msgID),
+						"id="+id,
+						"error="+err.Error(),
+					)
+					cache.DeleteAudio(id)
+					return
+				}
+				break
+			}
+
+			cache.DeleteAudio(id)
+			logger.Info(
+				"Tombol audio Instagram dihapus otomatis",
 				zap.Int("msg_id", msgID),
-				zap.Error(err),
+				zap.String("id", id),
 			)
 
-			log.LogWarn(
-				ctx,
-				"Instagram.AudioButtonCleanup",
-				"Gagal menghapus tombol audio Instagram",
-				fmt.Sprintf("msg_id=%d", msgID),
-				"id="+id,
-				"error="+err.Error(),
-			)
+		case <-ctx.Done():
+			cache.DeleteAudio(id)
 		}
-
-		cache.DeleteAudio(id)
-
-		logger.Info(
-			"Tombol audio Instagram dihapus otomatis",
-			zap.Int("msg_id", msgID),
-			zap.String("id", id),
-		)
 	}(peer, videoMsgID, videoID)
 }
 
-func sendInstagramText(
-	ctx context.Context,
-	client *tg.Client,
-	peer tg.InputPeerClass,
-	text string,
-	replyTo *tg.InputReplyToMessage,
-	logger *zap.Logger,
-) {
-	req := &tg.MessagesSendMessageRequest{
-		Peer:     peer,
-		Message:  text,
-		RandomID: time.Now().UnixNano(),
-	}
-
-	if replyTo != nil {
-		req.SetReplyTo(replyTo)
-	}
-
-	_, err := client.MessagesSendMessage(ctx, req)
-	if err != nil {
-		logger.Warn("Gagal kirim pesan teks Instagram", zap.Error(err))
-		log.LogWarn(
-			ctx,
-			"Instagram.SendText",
-			"Gagal mengirim pesan teks Instagram",
-			"text="+text,
-			"error="+err.Error(),
-		)
-	}
+func kirimAlbumStreamInstagram(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, title string, imageURLs []string, replyTo *tg.InputReplyToMessage, logger *zap.Logger) error {
+	return kirimAlbumStream(ctx, client, peer, title, imageURLs, replyTo, logger)
 }
 
 func trimInstagramTitle(title string) string {
@@ -586,25 +550,4 @@ func safeInstagramFileID(id string) string {
 	)
 
 	return replacer.Replace(id)
-}
-
-func readAllSmall(r interface {
-	Read([]byte) (int, error)
-}) ([]byte, error) {
-	var out []byte
-	buf := make([]byte, 32*1024)
-
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			out = append(out, buf[:n]...)
-		}
-
-		if err != nil {
-			if err.Error() == "EOF" {
-				return out, nil
-			}
-			return out, err
-		}
-	}
 }

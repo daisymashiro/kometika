@@ -178,62 +178,11 @@ func HandleGroupDL(ctx context.Context, client *tg.Client, msg *tg.Message, enti
 	topicID := getTopicID(msg)
 	replyTo := buildReplyTo(msg.ID, topicID)
 
-	// Terabox
-	if IsTeraboxLink(url) {
+	if config.IsTeraboxLink(url) { // <-- Ubah menjadi config.IsTeraboxLink
 		return HandleTerabox(ctx, client, msg, entities, url)
 	}
 
-	// Cek apakah ini Private Chat (Japri)
-	isPrivate := false
-	if _, ok := msg.PeerID.(*tg.PeerUser); ok {
-		isPrivate = true
-	}
-
-	var progressMsgID int
-
-	// Kirim pesan loading hanya di grup
-	if !isPrivate {
-		randID, _ := media.RandomID()
-		if randID == 0 {
-			randID = time.Now().UnixNano()
-		}
-
-		reqProgress := &tg.MessagesSendMessageRequest{
-			Peer:     peer,
-			Message:  "⏳ Memproses, mohon tunggu...",
-			RandomID: randID,
-		}
-		if replyTo != nil {
-			reqProgress.SetReplyTo(replyTo)
-		}
-
-		progressUpdates, err := client.MessagesSendMessage(ctx, reqProgress)
-		if err == nil && progressUpdates != nil {
-			progressMsgID, _ = media.ExtractMessageID(progressUpdates)
-		}
-	}
-
-	// Hapus pesan progress setelah selesai
-	defer func() {
-		if progressMsgID == 0 {
-			return
-		}
-		// Gunakan goroutine + delay untuk delete
-		go func() {
-			time.Sleep(2 * time.Second) // Delay 2 detik
-			delCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			if err := deleteGroupMessage(delCtx, client, peer, progressMsgID); err != nil {
-				logger.Debug("Gagal hapus pesan progress (mungkin sudah terhapus)",
-					zap.Int("msg_id", progressMsgID),
-					zap.Error(err),
-				)
-			}
-		}()
-	}()
-
-	// Route ke handler yang sesuai
+	// Route ke handler yang sesuai (handler akan mengelola loading message sendiri)
 	switch {
 	case config.IsPlatformURL(url, "tiktok"):
 		return HandleTikTok(ctx, client, msg, entities, url, logger)
@@ -244,13 +193,13 @@ func HandleGroupDL(ctx context.Context, client *tg.Client, msg *tg.Message, enti
 	case config.IsPlatformURL(url, "facebook"):
 		return HandleFacebook(ctx, client, msg, entities, url, logger)
 	case config.IsPlatformURL(url, "mediafire"):
-		return handleMediaFireGroup(ctx, client, peer, url, replyTo, logger)
+		return HandleMediaFire(ctx, client, msg, entities, url, logger)
 	case config.IsPlatformURL(url, "aceimg"):
 		return HandleAceImg(ctx, client, msg, entities, url, logger)
 	case config.IsPlatformURL(url, "twitter"):
 		return HandleTwitter(ctx, client, msg, entities, url, logger)
 	default:
-		if err := sendGroupText(ctx, client, peer, "❌ URL tidak dikenali. Platform yang didukung:\n• TikTok\n• Instagram\n• Facebook\n• Lulustream\n• Terabox", replyTo); err != nil {
+		if err := sendGroupText(ctx, client, peer, "❌ URL tidak dikenali. Platform yang didukung:\n• TikTok\n• Instagram\n• Facebook\n• Twitter\n• Lulustream\n• Terabox\n• MediaFire\n• AceImg", replyTo); err != nil {
 			logger.Error("Gagal kirim pesan error", zap.Error(err))
 		}
 		return fmt.Errorf("unsupported URL: %s", url)
