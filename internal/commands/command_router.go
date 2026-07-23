@@ -59,6 +59,8 @@ func (r *CommandRouter) RouteCommand(ctx context.Context, msg *tg.Message, entit
 		return r.handleOff(ctx, msg, entities, args, user)
 	case "getid", "groupinfo":
 		return r.handleGetID(ctx, msg, entities, user)
+	case "play":
+		return r.handlePlay(ctx, msg, entities, args)
 	default:
 		return nil
 	}
@@ -179,6 +181,23 @@ func (r *CommandRouter) handleOn(ctx context.Context, msg *tg.Message, entities 
 		return nil
 	}
 	return HandleFeatureOnCommand(ctx, r.client, msg, entities, args, r.logger)
+}
+
+func (r *CommandRouter) handlePlay(ctx context.Context, msg *tg.Message, entities tg.Entities, args []string) error {
+	// Pengecekan argumen URL
+	if len(args) < 1 {
+		peer, _ := GetPeerFromMessage(ctx, r.client, msg, entities)
+		if peer != nil {
+			// Gunakan helper yang sudah ada di codebase Anda
+			replyTo := buildReplyTo(msg.ID, getTopicID(msg))
+			_ = sendGroupText(ctx, r.client, peer, "⚠️ <b>Format salah.</b>\nGunakan: <code>.play <url_youtube></code>", replyTo)
+		}
+		return nil
+	}
+
+	url := args[0]
+	// Panggil HandlePlayCommand yang sudah kita buat sebelumnya
+	return HandlePlayCommand(ctx, r.client, msg, entities, url, r.logger)
 }
 
 func (r *CommandRouter) handleOff(ctx context.Context, msg *tg.Message, entities tg.Entities, args []string, user *tg.User) error {

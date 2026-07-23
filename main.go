@@ -547,6 +547,18 @@ func handleMessage(ctx context.Context, tgClient *tg.Client, msgClass tg.Message
 func handleCallbackQuery(ctx context.Context, tgClient *tg.Client, query *tg.UpdateBotCallbackQuery, logger *zap.Logger) error {
 	data := query.Data
 
+	if bytes.HasPrefix(data, []byte("ytplay_")) || bytes.HasPrefix(data, []byte("ytstop_")) {
+		peer, err := getPeerFromCallback(ctx, tgClient, query)
+		if err != nil {
+			logger.Error("Gagal dapat peer dari callback YouTube", zap.Error(err))
+			return nil
+		}
+
+		// Lempar ke YouTube Callback Handler menggunakan Background context
+		// agar tidak terpotong oleh timeout callback dari Telegram
+		return commands.HandleYouTubeLiveCallback(context.Background(), tgClient, peer, query.MsgID, query, logger)
+	}
+
 	if bytes.HasPrefix(data, []byte("tb_")) {
 		peer, err := getPeerFromCallback(ctx, tgClient, query)
 		if err != nil {

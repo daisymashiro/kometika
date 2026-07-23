@@ -21,10 +21,10 @@ type APIConfig struct {
 
 // Daftar API shortener
 var shortenerAPIs = []APIConfig{
-	{URL: "https://api-shorturl.nayumiwandi.workers.dev/", FieldName: "short_url", Name: "nayumiwandi"},
 	{URL: "https://apiv1.layanan-yumi.workers.dev/", FieldName: "short_url", Name: "layanan-yumi"},
 	{URL: "https://apishorturl2.yumidev.workers.dev/", FieldName: "short_url", Name: "yumidev"},
 	{URL: "https://apishorturl3.benigof977.workers.dev/", FieldName: "short_url", Name: "benigof977"},
+	{URL: "https://api-shorturl.nayumiwandi.workers.dev/", FieldName: "short_url", Name: "nayumiwandi"},
 	{URL: "https://www.urlfy.org/api/v1/shorten", FieldName: "shortUrl", Name: "urlfy"},
 }
 
@@ -157,4 +157,3 @@ func maskURL(url string) string {
 	}
 	return url
 }
-

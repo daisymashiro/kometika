@@ -44,9 +44,9 @@ func FetchTeraboxUniversal(teraboxURL string) ([]TeraboxUniversalData, error) {
 		fn   func(string) ([]TeraboxUniversalData, error)
 	}{
 		{"Iteraplay", FetchIteraMediaUniversal},
-		{"Terabox Mayumi", FetchTeraboxDirectUniversal},
 		{"FlowVideoPlayer", fetchFlowVideoPlayerUniversal},
 		{"Netlify API", FetchTeraboxAPI2},
+		{"Terabox Mayumi", FetchTeraboxDirectUniversal},
 	}
 
 	var lastErr error
@@ -64,13 +64,13 @@ func FetchTeraboxUniversal(teraboxURL string) ([]TeraboxUniversalData, error) {
 
 		logInfo("Mencoba API", zap.String("api", apiItem.name), zap.String("url", teraboxURL))
 		data, err := apiItem.fn(teraboxURL)
-		
+
 		if err == nil && len(data) > 0 {
 			logInfo("API berhasil", zap.String("api", apiItem.name), zap.Int("total_files", len(data)))
 			teraboxBreaker.RecordSuccess(apiItem.name)
 			return data, nil
 		}
-		
+
 		lastErr = err
 		teraboxBreaker.RecordFailure(apiItem.name)
 		logWarn("API gagal", zap.String("api", apiItem.name), zap.Error(err))

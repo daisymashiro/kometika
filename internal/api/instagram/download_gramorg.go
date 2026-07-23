@@ -116,7 +116,7 @@ func FetchInstagramFromDownloadGram(instaURL string) (*UniversalInstagramData, e
 	// 7. Kembalikan ke format Universal
 	return &UniversalInstagramData{
 		ID:        numericID,
-		Title:     "Instagram Media (DownloadGram)",
+		Title:     "Instagram Media",
 		AudioURL:  "",
 		VideoURL:  videoURL,
 		IsAlbum:   len(imageURLs) > 1,
