@@ -12,6 +12,7 @@ import (
 	"mybot/internal/api"
 	"mybot/internal/api/youtube"
 	"mybot/internal/cache"
+	"mybot/internal/media"
 )
 
 // HandlePlayCommand menangani perintah `.play <url>` di grup
@@ -49,9 +50,7 @@ func HandlePlayCommand(ctx context.Context, client *tg.Client, msg *tg.Message, 
 	// 3. Bangun Inline Keyboard berdasarkan Resolusi
 	var rows []tg.KeyboardButtonRow
 	for i, vid := range ytData.Videos {
-		// Buat tombol maksimal 2 per baris agar rapi
 		btnText := fmt.Sprintf("🎬 %s (%s)", vid.Quality, vid.Format)
-		// Format Callback: ytplay_<videoID>_<indexVideo>
 		cbData := fmt.Sprintf("ytplay_%s_%d", ytData.ID, i)
 
 		btn := &tg.KeyboardButtonCallback{
@@ -82,10 +81,8 @@ func HandlePlayCommand(ctx context.Context, client *tg.Client, msg *tg.Message, 
 	caption := fmt.Sprintf("▶️ Siap Memutar Livestream\n\n📝 Judul: %s\n⏱ Durasi: %d detik\n\nSilakan pilih resolusi video di bawah ini untuk memulai siaran:", ytData.Title, ytData.Duration)
 
 	mediaReq := &tg.MessagesSendMediaRequest{
-		Peer: peer,
-		Media: &tg.InputMediaUploadedPhoto{
-			File: thumbFile,
-		},
+		Peer:        peer,
+		Media:       &tg.InputMediaUploadedPhoto{File: thumbFile},
 		Message:     caption,
 		RandomID:    time.Now().UnixNano(),
 		ReplyMarkup: replyMarkup,
@@ -94,9 +91,21 @@ func HandlePlayCommand(ctx context.Context, client *tg.Client, msg *tg.Message, 
 		mediaReq.SetReplyTo(replyTo)
 	}
 
-	_, err = client.MessagesSendMedia(ctx, mediaReq)
+	updates, err := client.MessagesSendMedia(ctx, mediaReq)
 	if err != nil {
 		logger.Error("Gagal mengirim panel play", zap.Error(err))
+		return err
 	}
-	return err
+
+	menuMsgID, errExt := media.ExtractMessageID(updates)
+	if errExt == nil && menuMsgID != 0 {
+		time.AfterFunc(15*time.Minute, func() {
+			if _, ok := cache.GetLiveSession(ytData.ID); ok {
+				_ = deleteGroupMessage(context.Background(), client, peer, menuMsgID)
+				cache.DeleteLiveSession(ytData.ID)
+				logger.Info("Panel YouTube otomatis dihapus agar chat bersih", zap.String("id", ytData.ID))
+			}
+		})
+	}
+	return nil
 }

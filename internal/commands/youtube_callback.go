@@ -15,7 +15,6 @@ import (
 	"mybot/internal/streamer"
 )
 
-// HandleYouTubeLiveCallback adalah entry point untuk callback query YouTube Live
 func HandleYouTubeLiveCallback(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, msgID int, update *tg.UpdateBotCallbackQuery, logger *zap.Logger) error {
 	rawData := string(update.Data)
 
@@ -30,7 +29,6 @@ func HandleYouTubeLiveCallback(ctx context.Context, client *tg.Client, peer tg.I
 	return nil
 }
 
-// handlePlayLive menangani saat user memilih resolusi video dan memulai streaming
 func handlePlayLive(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, msgID int, update *tg.UpdateBotCallbackQuery, rawData string, logger *zap.Logger) error {
 	parts := strings.Split(rawData, "_")
 
@@ -45,26 +43,15 @@ func handlePlayLive(ctx context.Context, client *tg.Client, peer tg.InputPeerCla
 		return err
 	}
 
-	// 1. Ambil data dari State Cache
 	session, ok := cache.GetLiveSession(videoID)
 	if !ok {
-		media.AnswerCallback(ctx, client, update.QueryID, "❌ Sesi telah kedaluwarsa. Silakan kirim ulang command .play", true)
-		return nil
-	}
-
-	if session.Cancel != nil {
-		media.AnswerCallback(ctx, client, update.QueryID, "⚠️ Stream untuk video ini sedang berjalan.", true)
-		return nil
-	}
-
-	if videoIdx >= len(session.VideoData.Videos) {
-		media.AnswerCallback(ctx, client, update.QueryID, "❌ Resolusi tidak ditemukan.", true)
+		media.AnswerCallback(ctx, client, update.QueryID, "❌ Sesi telah kedaluwarsa.", true)
+		_ = deleteGroupMessage(ctx, client, peer, msgID) // Bersihkan UI jika telat klik
 		return nil
 	}
 
 	videoTarget := session.VideoData.Videos[videoIdx]
 
-	// 2. Ambil Audio Terbaik (Dengan Fallback)
 	var audioTargetURL string
 	for _, a := range session.VideoData.Audios {
 		if strings.Contains(strings.ToLower(a.Format), "m4a") || strings.Contains(strings.ToLower(a.Format), "aac") {
@@ -75,87 +62,121 @@ func handlePlayLive(ctx context.Context, client *tg.Client, peer tg.InputPeerCla
 	if audioTargetURL == "" && len(session.VideoData.Audios) > 0 {
 		audioTargetURL = session.VideoData.Audios[0].URL
 	}
-
 	if audioTargetURL == "" {
-		media.AnswerCallback(ctx, client, update.QueryID, "❌ Tidak ada stream audio yang tersedia dari video ini.", true)
+		media.AnswerCallback(ctx, client, update.QueryID, "❌ Tidak ada stream audio yang tersedia.", true)
 		return nil
 	}
 
-	// 3. Ambil RTMP Endpoint dari Environment Variables (.env)
 	rtmpURL := os.Getenv("RTMP_URL")
 	rtmpKey := os.Getenv("RTMP_KEY")
 
 	if rtmpURL == "" || rtmpKey == "" {
-		errMsg := "❌ Konfigurasi RTMP belum diatur. Pastikan Admin telah mengatur `RTMP_URL` dan `RTMP_KEY` di server bot."
+		errMsg := "❌ Konfigurasi RTMP belum diatur di server bot."
 		if editErr := media.EditWithMarkup(ctx, client, peer, msgID, errMsg, nil); editErr != nil {
 			logger.Error("Gagal update pesan error RTMP env", zap.Error(editErr))
 		}
 		return nil
 	}
 
-	// Gabungkan URL dan Key (Pastikan tidak ada double slash)
-	rtmpURL = strings.TrimRight(rtmpURL, "/")
-	rtmpEndpoint := fmt.Sprintf("%s/%s", rtmpURL, rtmpKey)
+	rtmpEndpoint := fmt.Sprintf("%s/%s", strings.TrimRight(rtmpURL, "/"), rtmpKey)
 
-	media.AnswerCallback(ctx, client, update.QueryID, "Memulai Livestream...", false)
+	queuePos, wasPlaying, errQ := cache.EnqueueStream(cache.QueuedStream{
+		VideoID:  videoID,
+		VideoURL: videoTarget.URL,
+		AudioURL: audioTargetURL,
+		Title:    session.VideoData.Title,
+		Quality:  videoTarget.Quality,
+		MsgID:    msgID,
+		Peer:     peer,
+	})
 
-	// 4. Edit Pesan (Hapus Tombol & Beri Status Live)
-	liveCaption := fmt.Sprintf("🔴 LIVE STREAMING SEDANG BERJALAN\n\n📝 Judul: %s\n🎬 Resolusi: %s\n\nSilakan bergabung ke Obrolan Video di bagian atas grup untuk menonton.", session.VideoData.Title, videoTarget.Quality)
-
-	stopMarkup := &tg.ReplyInlineMarkup{
-		Rows: []tg.KeyboardButtonRow{
-			{Buttons: []tg.KeyboardButtonClass{
-				&tg.KeyboardButtonCallback{
-					Text: "⏹ Hentikan Stream",
-					Data: []byte(fmt.Sprintf("ytstop_%s", videoID)),
-				},
-			}},
-		},
+	if errQ != nil {
+		media.AnswerCallback(ctx, client, update.QueryID, "⚠️ "+errQ.Error(), true)
+		return nil
 	}
 
-	if err := media.EditWithMarkup(ctx, client, peer, msgID, liveCaption, stopMarkup); err != nil {
-		logger.Error("Gagal mengedit pesan menjadi status live", zap.Error(err))
-	}
+	cache.DeleteLiveSession(videoID)
+	media.AnswerCallback(ctx, client, update.QueryID, "Memproses livestream...", false)
 
-	// 5. Jalankan Zero-Disk Muxer di Background
-	streamCtx, cancelStream := context.WithCancel(context.Background())
-
-	// Simpan context cancel ke state cache (groupCall kita isi nil karena bot tidak bisa close call)
-	cache.SetLiveActive(videoID, cancelStream, nil)
-
-	go func() {
-		defer cache.StopLiveStream(videoID)
-		err := streamer.PushToRTMP(streamCtx, videoTarget.URL, audioTargetURL, rtmpEndpoint, logger)
-
-		if err != nil && streamCtx.Err() == nil {
-			logger.Error("Stream terputus", zap.Error(err))
-			_ = media.EditWithMarkup(context.Background(), client, peer, msgID, "🛑 Stream Terputus karena kesalahan jaringan atau video selesai.", nil)
-		} else {
-			_ = media.EditWithMarkup(context.Background(), client, peer, msgID, "⏹ Stream video telah selesai atau dihentikan.", nil)
+	if wasPlaying {
+		queuedCaption := fmt.Sprintf("⏳ DITAMBAHKAN KE ANTREAN\n\n📝 Judul: %s\n🎬 Resolusi: %s\n🔢 Posisi Antrean: %d", session.VideoData.Title, videoTarget.Quality, queuePos)
+		stopMarkup := &tg.ReplyInlineMarkup{
+			Rows: []tg.KeyboardButtonRow{
+				{Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonCallback{
+						Text: "❌ Batal Antrean",
+						Data: []byte(fmt.Sprintf("ytstop_%s", videoID)),
+					},
+				}},
+			},
 		}
-	}()
+		if err := media.EditWithMarkup(ctx, client, peer, msgID, queuedCaption, stopMarkup); err != nil {
+			logger.Error("Gagal edit pesan antrean", zap.Error(err))
+		}
+	} else {
+		go processStreamQueueWorker(client, rtmpEndpoint, logger)
+	}
 
 	return nil
 }
 
-// handleStopLive menangani saat user menekan tombol "Hentikan Stream"
+func processStreamQueueWorker(client *tg.Client, rtmpEndpoint string, logger *zap.Logger) {
+	for {
+		item, ok := cache.DequeueStream()
+		if !ok {
+			break
+		}
+
+		streamCtx, cancelStream := context.WithCancel(context.Background())
+		cache.SetCurrentStream(item.VideoID, cancelStream)
+
+		liveCaption := fmt.Sprintf("🔴 LIVE STREAMING SEDANG BERJALAN\n\n📝 Judul: %s\n🎬 Resolusi: %s\n\nSilakan bergabung ke Obrolan Video di atas untuk menonton.", item.Title, item.Quality)
+		stopMarkup := &tg.ReplyInlineMarkup{
+			Rows: []tg.KeyboardButtonRow{
+				{Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonCallback{
+						Text: "⏹ Hentikan Stream",
+						Data: []byte(fmt.Sprintf("ytstop_%s", item.VideoID)),
+					},
+				}},
+			},
+		}
+
+		_ = media.EditWithMarkup(context.Background(), client, item.Peer, item.MsgID, liveCaption, stopMarkup)
+
+		err := streamer.PushToRTMP(streamCtx, item.VideoURL, item.AudioURL, rtmpEndpoint, logger)
+
+		if err != nil && streamCtx.Err() == nil {
+			logger.Error("Stream terputus", zap.Error(err))
+			_ = media.EditWithMarkup(context.Background(), client, item.Peer, item.MsgID, "🛑 Stream Terputus karena kesalahan jaringan atau video selesai.", nil)
+		} else {
+			// === AUTO-CLEANUP SAAT STREAM SELESAI/DISTOP ===
+			_ = deleteGroupMessage(context.Background(), client, item.Peer, item.MsgID)
+		}
+
+		cache.SetCurrentStream("", nil)
+	}
+}
+
 func handleStopLive(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, msgID int, update *tg.UpdateBotCallbackQuery, rawData string, logger *zap.Logger) error {
 	videoID := strings.TrimPrefix(rawData, "ytstop_")
 
-	_, ok := cache.GetLiveSession(videoID)
-	if !ok {
-		media.AnswerCallback(ctx, client, update.QueryID, "Sesi tidak ditemukan atau sudah berhenti.", true)
+	if cache.RemoveFromQueue(videoID) {
+		media.AnswerCallback(ctx, client, update.QueryID, "Antrean dibatalkan.", false)
+		// === Hapus pesan saat antrean dibatalkan ===
+		_ = deleteGroupMessage(ctx, client, peer, msgID)
 		return nil
 	}
 
-	media.AnswerCallback(ctx, client, update.QueryID, "Menghentikan streaming...", false)
-
-	// Hentikan FFmpeg Muxer (Cleanup Resource STB)
-	cache.StopLiveStream(videoID)
-
-	if err := media.EditWithMarkup(ctx, client, peer, msgID, "⏹ Livestream telah dihentikan secara manual.", nil); err != nil {
-		logger.Warn("Gagal mengedit pesan stop stream", zap.Error(err))
+	if cache.IsCurrentStream(videoID) {
+		media.AnswerCallback(ctx, client, update.QueryID, "Menghentikan streaming...", false)
+		cache.StopCurrentStream()
+		// Pesan tidak perlu dihapus di sini, karena otomatis dihapus oleh worker di processStreamQueueWorker
+		return nil
 	}
 
+	media.AnswerCallback(ctx, client, update.QueryID, "Sesi tidak ditemukan atau sudah selesai.", true)
+	// === Bersihkan pesan yang nyangkut ===
+	_ = deleteGroupMessage(ctx, client, peer, msgID)
 	return nil
 }

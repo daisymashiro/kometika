@@ -3,7 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
-	"math/rand"
+	"os"
 	"strings"
 
 	"github.com/gotd/td/tg"
@@ -11,10 +11,10 @@ import (
 
 	"mybot/internal/api/youtube"
 	"mybot/internal/cache"
-	"mybot/internal/streamer"
+	"mybot/internal/media"
 )
 
-// HandleYouTubeLive merespons perintah khusus untuk memulai livestreaming ke grup secara langsung
+// HandleYouTubeLive merespons perintah khusus untuk memulai livestreaming ke grup secara LANGSUNG (tanpa menu)
 func HandleYouTubeLive(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string, logger *zap.Logger) error {
 	peer, err := GetPeerFromMessage(ctx, client, msg, entities)
 	if err != nil || peer == nil {
@@ -24,93 +24,86 @@ func HandleYouTubeLive(ctx context.Context, client *tg.Client, msg *tg.Message, 
 	replyTo := buildReplyTo(msg.ID, getTopicID(msg))
 
 	// 1. Ekstrak Data dari YouTube
-	_ = sendGroupText(ctx, client, peer, "🔄 Mengambil data stream YouTube.", replyTo)
+	loadingMsgID, _ := sendLoadingMessage(ctx, client, peer, "🔄 <b>Mengambil data stream YouTube...</b>", replyTo, logger)
+
 	ytData, err := youtube.FetchYouTubeData(url)
 	if err != nil {
-		_ = sendGroupText(ctx, client, peer, "❌ Gagal mengambil data YouTube.", replyTo)
+		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Gagal mengambil data YouTube.", logger)
 		return err
 	}
 
-	if len(ytData.Videos) == 0 || len(ytData.Audios) == 0 {
-		return fmt.Errorf("ketersediaan video atau audio tidak lengkap")
+	if len(ytData.Videos) == 0 {
+		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Tidak ada format video yang tersedia.", logger)
+		return nil
 	}
 
-	// Filter: RTMP FLV mensyaratkan Audio AAC (M4A) dan Video MP4 (H264).
-	var videoURL, audioURL string
-	for _, v := range ytData.Videos {
-		if strings.Contains(strings.ToLower(v.Format), "mp4") {
-			videoURL = v.URL
-			break // Ambil kualitas yang diranking paling atas oleh vidssave
-		}
-	}
+	// 2. Ambil Video Terbaik (Index 0 biasanya yang tertinggi)
+	videoTarget := ytData.Videos[0]
+
+	// 3. Ambil Audio Terbaik (Dengan Fallback)
+	var audioTargetURL string
 	for _, a := range ytData.Audios {
 		if strings.Contains(strings.ToLower(a.Format), "m4a") || strings.Contains(strings.ToLower(a.Format), "aac") {
-			audioURL = a.URL
+			audioTargetURL = a.URL
 			break
 		}
 	}
-
-	if videoURL == "" || audioURL == "" {
-		_ = sendGroupText(ctx, client, peer, "❌ Format MP4/M4A tidak ditemukan. RTMP membutuhkan codec H264/AAC.", replyTo)
-		return fmt.Errorf("format tidak didukung untuk zero-copy RTMP")
+	if audioTargetURL == "" && len(ytData.Audios) > 0 {
+		audioTargetURL = ytData.Audios[0].URL
+	}
+	if audioTargetURL == "" {
+		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Tidak ada stream audio yang tersedia.", logger)
+		return nil
 	}
 
-	// 2. Inisialisasi Group Call RTMP di Telegram
-	_ = sendGroupText(ctx, client, peer, "📡 Membuka Group Call dan Endpoint RTMP.", replyTo)
+	// 4. Ambil RTMP dari .env
+	rtmpURL := os.Getenv("RTMP_URL")
+	rtmpKey := os.Getenv("RTMP_KEY")
 
-	callUpdates, err := client.PhoneCreateGroupCall(ctx, &tg.PhoneCreateGroupCallRequest{
-		Peer:       peer,
-		RtmpStream: true,
-		RandomID:   rand.Int(),
+	if rtmpURL == "" || rtmpKey == "" {
+		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Konfigurasi RTMP belum diatur di server bot.", logger)
+		return nil
+	}
+	rtmpEndpoint := fmt.Sprintf("%s/%s", strings.TrimRight(rtmpURL, "/"), rtmpKey)
+
+	// 5. Masukkan ke Antrean (Queue Manager)
+	queuePos, wasPlaying, errQ := cache.EnqueueStream(cache.QueuedStream{
+		VideoID:  ytData.ID,
+		VideoURL: videoTarget.URL,
+		AudioURL: audioTargetURL,
+		Title:    ytData.Title,
+		Quality:  videoTarget.Quality + " (Direct)",
+		MsgID:    loadingMsgID, // Kita gunakan (dan edit) pesan loading ini
+		Peer:     peer,
 	})
-	if err != nil {
-		logger.Error("Gagal membuat Group Call", zap.Error(err))
-		return err
+
+	if errQ != nil {
+		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "⚠️ "+errQ.Error(), logger)
+		return nil
 	}
 
-	// Ekstrak InputGroupCall agar 'callUpdates' terpakai
-	var groupCall tg.InputGroupCallClass
-	if updates, ok := callUpdates.(*tg.Updates); ok {
-		for _, u := range updates.Updates {
-			if callUpdate, ok := u.(*tg.UpdateGroupCall); ok {
-				if call, ok := callUpdate.Call.(*tg.GroupCall); ok {
-					groupCall = &tg.InputGroupCall{
-						ID:         call.ID,
-						AccessHash: call.AccessHash,
-					}
-					break
-				}
-			}
+	// 6. Evaluasi Status Antrean
+	if wasPlaying {
+		queuedCaption := fmt.Sprintf("⏳ <b>DITAMBAHKAN KE ANTREAN</b>\n\n📝 <b>Judul:</b> %s\n🎬 <b>Resolusi:</b> %s\n🔢 <b>Posisi Antrean:</b> %d", ytData.Title, videoTarget.Quality, queuePos)
+
+		stopMarkup := &tg.ReplyInlineMarkup{
+			Rows: []tg.KeyboardButtonRow{
+				{Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonCallback{
+						Text: "❌ Batal Antrean",
+						Data: []byte(fmt.Sprintf("ytstop_%s", ytData.ID)),
+					},
+				}},
+			},
 		}
+		_ = media.EditWithMarkup(ctx, client, peer, loadingMsgID, queuedCaption, stopMarkup)
+	} else {
+		// Jalankan worker pemutar di background
+		// Pastikan processStreamQueueWorker di-export menjadi ProcessStreamQueueWorker di youtube_callback.go
+		// atau letakkan file ini dalam package yang sama agar bisa saling panggil.
+		go processStreamQueueWorker(client, rtmpEndpoint, logger)
 	}
-
-	rtmpData, err := client.PhoneGetGroupCallStreamRtmpURL(ctx, &tg.PhoneGetGroupCallStreamRtmpURLRequest{
-		Peer:      peer,
-		Revoke:    false,
-		LiveStory: false,
-	})
-	if err != nil {
-		logger.Error("Gagal mendapatkan URL RTMP", zap.Error(err))
-		return err
-	}
-	rtmpEndpoint := fmt.Sprintf("%s/%s", rtmpData.URL, rtmpData.Key)
-
-	streamCtx, cancelStream := context.WithCancel(context.Background())
-
-	// 3. Masukkan ke cache (Wajib SetLiveSession dulu sebelum SetLiveActive untuk direct command)
-	cache.SetLiveSession(ytData.ID, ytData, url)
-	cache.SetLiveActive(ytData.ID, cancelStream, groupCall)
-
-	go func() {
-		defer cache.StopLiveStream(ytData.ID)
-		err := streamer.PushToRTMP(streamCtx, videoURL, audioURL, rtmpEndpoint, logger)
-		if err != nil {
-			logger.Error("Stream gagal di tengah jalan", zap.Error(err))
-		}
-	}()
-
-	caption := fmt.Sprintf("▶️ Livestream Dimulai!\n\n🎬 Judul: %s\n\nSilakan bergabung ke Voice Chat grup untuk menonton.", ytData.Title)
-	_ = sendGroupText(ctx, client, peer, caption, replyTo)
 
 	return nil
 }
+
