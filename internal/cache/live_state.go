@@ -128,12 +128,17 @@ func IsCurrentStream(vidID string) bool {
 }
 
 // StopCurrentStream mematikan FFmpeg yang sedang berjalan
+// FIX BUG #4: Panggil cancel() di luar lock untuk menghindari deadlock
 func StopCurrentStream() {
 	queueMu.Lock()
-	defer queueMu.Unlock()
-	if currentCtx != nil {
-		currentCtx()
-		currentCtx = nil
+	cancel := currentCtx
+	currentCtx = nil
+	queueMu.Unlock()
+	
+	// Call cancel outside the lock untuk menghindari deadlock
+	// jika cancel() memanggil callback yang butuh lock queueMu
+	if cancel != nil {
+		cancel()
 	}
 }
 

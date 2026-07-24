@@ -61,6 +61,8 @@ func (r *CommandRouter) RouteCommand(ctx context.Context, msg *tg.Message, entit
 		return r.handleGetID(ctx, msg, entities, user)
 	case "play":
 		return r.handlePlay(ctx, msg, entities, args)
+	case "botmode":
+		return r.handleBotMode(ctx, msg, entities)
 	default:
 		return nil
 	}
@@ -287,4 +289,8 @@ func getChannelUsername(channel *tg.Channel) string {
 		return "@" + channel.Username
 	}
 	return "(tidak ada)"
+}
+
+func (r *CommandRouter) handleBotMode(ctx context.Context, msg *tg.Message, entities tg.Entities) error {
+	return HandleBotModeCommand(ctx, r.client, msg, entities, r.rootID, r.logger)
 }

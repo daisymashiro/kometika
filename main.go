@@ -315,13 +315,13 @@ func main() {
 		logger.Warn("TELEGRAM_BOT_USERNAME belum diset di .env")
 	}
 
-	rootIDStr := os.Getenv("TELEGRAM_ROOT_ID")
+	rootIDStr := os.Getenv("OWNER_ID")
 	var rootID int64 = 0
 	if rootIDStr != "" {
 		var err error
 		rootID, err = strconv.ParseInt(rootIDStr, 10, 64)
 		if err != nil {
-			logger.Warn("Invalid TELEGRAM_ROOT_ID", zap.Error(err))
+			logger.Warn("Invalid OWNER_ID", zap.Error(err))
 		}
 	}
 
@@ -344,6 +344,17 @@ func main() {
 	})
 
 	dispatcher.OnBotNewBusinessMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateBotNewBusinessMessage) error {
+		msg, ok := update.Message.(*tg.Message)
+		if !ok {
+			return commands.BusinessMessageHandler(ctx, client.API(), update, entities, logger)
+		}
+
+		if rootID != 0 && msg.FromID != nil {
+			if peerUser, ok := msg.FromID.(*tg.PeerUser); ok && peerUser.UserID == rootID {
+				cache.UpdateOwnerActivity()
+				logger.Debug("Owner activity detected from message")
+			}
+		}
 		return commands.BusinessMessageHandler(ctx, client.API(), update, entities, logger)
 	})
 	//guest mod
@@ -374,6 +385,26 @@ func main() {
 			zap.String("conn_id", conn.ConnectionID),
 			zap.Bool("can_reply", rights.Reply),
 		)
+		return nil
+	})
+
+	// ============ TRACK OWNER STATUS ============
+	dispatcher.OnUserStatus(func(ctx context.Context, entities tg.Entities, update *tg.UpdateUserStatus) error {
+		if rootID == 0 || update.UserID != rootID {
+			return nil
+		}
+		switch update.Status.(type) {
+		case *tg.UserStatusOnline:
+			cache.SetOwnerOnline(true)
+			logger.Info("👤 Owner ONLINE", zap.Int64("owner_id", rootID))
+		case *tg.UserStatusOffline:
+			cache.SetOwnerOnline(false)
+			logger.Info("👤 Owner OFFLINE", zap.Int64("owner_id", rootID))
+		case *tg.UserStatusRecently:
+			cache.SetOwnerOnline(false)
+			cache.UpdateOwnerActivity()
+			logger.Info("👤 Owner RECENTLY active", zap.Int64("owner_id", rootID))
+		}
 		return nil
 	})
 	// ============ RUN CLIENT ============
@@ -499,6 +530,13 @@ func handleMessage(ctx context.Context, tgClient *tg.Client, msgClass tg.Message
 		return nil
 	}
 	text := msg.Message
+
+	// Deteksi owner dari DM - update lastActivity aja, jangan set isOnline
+	if rootID != 0 && msg.FromID != nil {
+		if peerUser, ok := msg.FromID.(*tg.PeerUser); ok && peerUser.UserID == rootID {
+			cache.UpdateOwnerActivity()
+		}
+	}
 
 	isCommand := false
 	for _, prefix := range []string{"/", ".", "!", "#"} {

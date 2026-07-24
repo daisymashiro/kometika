@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gotd/td/tg"
 	"go.uber.org/zap"
@@ -127,7 +128,10 @@ func processStreamQueueWorker(client *tg.Client, rtmpEndpoint string, logger *za
 			break
 		}
 
-		streamCtx, cancelStream := context.WithCancel(context.Background())
+		// FIX BUG #3: Tambahkan timeout 2 jam untuk mencegah context leak
+		// Jika FFmpeg hang, context akan otomatis di-cancel setelah 2 jam
+		streamCtx, cancelStream := context.WithTimeout(context.Background(), 2*time.Hour)
+		
 		cache.SetCurrentStream(item.VideoID, cancelStream)
 
 		liveCaption := fmt.Sprintf("🔴 LIVE STREAMING SEDANG BERJALAN\n\n📝 Judul: %s\n🎬 Resolusi: %s\n\nSilakan bergabung ke Obrolan Video di atas untuk menonton.", item.Title, item.Quality)
@@ -146,9 +150,15 @@ func processStreamQueueWorker(client *tg.Client, rtmpEndpoint string, logger *za
 
 		err := streamer.PushToRTMP(streamCtx, item.VideoURL, item.AudioURL, rtmpEndpoint, logger)
 
+		// Cleanup: Cancel context setelah streaming selesai/error
+		cancelStream()
+
 		if err != nil && streamCtx.Err() == nil {
 			logger.Error("Stream terputus", zap.Error(err))
 			_ = media.EditWithMarkup(context.Background(), client, item.Peer, item.MsgID, "🛑 Stream Terputus karena kesalahan jaringan atau video selesai.", nil)
+		} else if streamCtx.Err() == context.DeadlineExceeded {
+			logger.Warn("Stream timeout setelah 2 jam", zap.String("video_id", item.VideoID))
+			_ = media.EditWithMarkup(context.Background(), client, item.Peer, item.MsgID, "⏱ Stream dihentikan otomatis (timeout 2 jam).", nil)
 		} else {
 			// === AUTO-CLEANUP SAAT STREAM SELESAI/DISTOP ===
 			_ = deleteGroupMessage(context.Background(), client, item.Peer, item.MsgID)

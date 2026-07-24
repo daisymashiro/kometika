@@ -23,6 +23,12 @@ import (
 	"mybot/internal/media"
 )
 
+// FIX BUG #5: File size limits untuk guest mode
+const (
+	maxGuestVideoSize = 60 * 1024 * 1024 // 50 MB untuk video
+	maxGuestImageSize = 20 * 1024 * 1024 // 10 MB untuk gambar
+)
+
 var (
 	cachePeer   tg.InputPeerClass
 	cachePeerMu sync.Mutex
@@ -388,6 +394,9 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 	}
 	defer stream.Close()
 
+	// FIX BUG #5: Limit ukuran file untuk mencegah OOM
+	limitedStream := io.LimitReader(stream, maxGuestVideoSize)
+
 	peer := getCachePeer()
 	if peer == nil {
 		var err2 error
@@ -398,7 +407,7 @@ func uploadMediaToCache(ctx context.Context, client *tg.Client, mediaURL string,
 	}
 
 	up := uploader.NewUploader(client).WithThreads(1)
-	file, err := up.FromReader(ctx, filename, stream)
+	file, err := up.FromReader(ctx, filename, limitedStream)
 	if err != nil {
 		return 0, 0, nil, err
 	}
@@ -512,8 +521,11 @@ func uploadImageToCache(ctx context.Context, client *tg.Client, imageURL string)
 	}
 	defer stream.Close()
 
+	// FIX BUG #5: Limit ukuran file untuk mencegah OOM
+	limitedStream := io.LimitReader(stream, maxGuestImageSize)
+
 	// Baca stream sepenuhnya ke buffer sebelum divalidasi
-	body, err := io.ReadAll(stream)
+	body, err := io.ReadAll(limitedStream)
 	if err != nil {
 		return 0, 0, nil, err
 	}

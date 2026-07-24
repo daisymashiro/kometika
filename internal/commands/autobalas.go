@@ -1,16 +1,12 @@
 package commands
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"math/rand"
+	"mybot/internal/cache"
 	"mybot/internal/config"
 	"mybot/internal/log"
-	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,10 +22,6 @@ import (
 var (
 	businessStateMu sync.RWMutex
 	businessState   = make(map[string]*BusinessState)
-)
-
-var keywordReplacer = strings.NewReplacer(
-	",", " ", ".", " ", "!", " ", "?", " ", ";", " ", ":", " ",
 )
 
 type BusinessState struct {
@@ -75,170 +67,6 @@ const (
 	StickerEmoji   = "🤠"                            // ganti sesuai emoji
 )
 
-// ======================== KEYWORD MAP ========================
-
-var keywordMap = map[string]bool{
-	"halo":            true,
-	"yumi":            true,
-	"ruri":            true,
-	"hai":             true,
-	"hi":              true,
-	"hello":           true,
-	"hallo":           true,
-	"helo":            true,
-	"hlo":             true,
-	"hy":              true,
-	"yi":              true,
-	"oy":              true,
-	"p":               true,
-	"ping":            true,
-	"test":            true,
-	"selamat":         true,
-	"pagi":            true,
-	"siang":           true,
-	"sore":            true,
-	"malam":           true,
-	"assalamualaikum": true,
-	"waalaikumsalam":  true,
-	"slmt":            true,
-	"pgi":             true,
-	"bro":             true,
-	"sis":             true,
-	"boss":            true,
-	"bos":             true,
-	"min":             true,
-	"kak":             true,
-	"ko":              true,
-	"mbak":            true,
-	"mas":             true,
-	"dek":             true,
-	"ndu":             true,
-	"tengkiu":         true,
-	"makasih":         true,
-	"thx":             true,
-	"thanks":          true,
-	"hey":             true,
-	"good":            true,
-	"morning":         true,
-	"afternoon":       true,
-	"evening":         true,
-	"greetings":       true,
-	"yo":              true,
-	"sup":             true,
-	"what's up":       true,
-	"howdy":           true,
-	"halo kak":        true,
-	"halo min":        true,
-	"hai admin":       true,
-	"permisi":         true,
-	"mau tanya":       true,
-	"boleh tanya":     true,
-	"nanya dong":      true,
-	"gan":             true,
-	"agya":            true,
-	"om":              true,
-	"beb":             true,
-}
-
-// ======================== AI CONFIG (GROQ) ========================
-
-const geminiBaseURL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"
-
-func getGeminiAPIKey() string {
-	return os.Getenv("GEMINI_API_KEY")
-}
-
-func generateAIReply(ctx context.Context, userMessage string) (string, error) {
-	apiKey := getGeminiAPIKey()
-	if apiKey == "" {
-		return "", fmt.Errorf("GEMINI_API_KEY tidak ditemukan di environment")
-	}
-
-	systemPrompt := `
-Kamu adalah Asisten AI yang ceria, ramah, dan profesional untuk bot Telegram. Kamu juga berjiwa Wibu dan sangat suka anime.
-
-Tugasmu adalah membalas pesan masuk dari pengguna, terutama saat mereka menyapa atau mengirim pertanyaan singkat.
-
-Aturan utama yang harus kamu patuhi:
-1. Gunakan Bahasa Indonesia yang santun, alami, dan hangat. Jangan terdengar seperti robot kaku.
-2. Balasan harus SINGKAT, maksimal 60 kata.
-3. Jangan pernah mengulang kalimat yang sama persis. Buatlah variasi jawaban secara acak. Contohnya: "Eh, halo! Silakan tunggu admin online, ya :3", atau jika ada yang bertanya "beb ngapain?", kamu bisa membalas "Duh, beb lagi offline nih. Ini pesan otomatis dari bot!". Jangan lupa untuk selalu mengingatkan bahwa kamu adalah bot dan pesan akan dibalas saat admin online.
-4. JANGAN mengajukan pertanyaan balik yang rumit atau membutuhkan jawaban panjang, karena ini pesan otomatis dan pengguna mungkin hanya ingin menyapa.
-5. Jangan memberikan informasi spesifik tentang lokasi, jam buka, atau nomor admin, karena kamu hanya asisten otomatis.
-6. Jika pesan pengguna berisi pertanyaan teknis, rumit, atau meminta bantuan khusus, balas dengan ramah bahwa pesan akan diteruskan ke admin dan akan direspon segera.
-7. Jangan membalas dengan kata-kata negatif, kasar, atau defensif. Selalu jaga nada bicara yang menyenangkan.
-8. Jika pengguna hanya mengirim stiker, kamu cukup membalas dengan stiker balasan (ini sudah diatur oleh sistem, kamu tidak perlu menulis balasan teks untuk stiker).
-9. Kamu boleh menambahkan emoji dan karakter lucu seperti :3, -_-, '_', atau :v.
-
-Tujuan utama kamu adalah membuat pengguna merasa dihargai dan diperhatikan, serta memberikan kesan pertama yang baik, meskipun hanya dengan balasan singkat.
-`
-
-	// Gabungkan system prompt dengan pesan user
-	fullPrompt := systemPrompt + "\n\nPesan dari pengguna: " + userMessage
-
-	payload := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{
-				"parts": []map[string]string{
-					{"text": fullPrompt},
-				},
-			},
-		},
-	}
-
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("gagal encode JSON: %w", err)
-	}
-
-	url := geminiBaseURL + "?key=" + apiKey
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("gagal buat request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 45 * time.Second} // Gemini mungkin lebih lambat, beri timeout lebih longgar
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("gagal panggil Gemini: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("gagal baca response: %w", err)
-	}
-
-	// Struct untuk response Gemini
-	var result struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf("gagal parse JSON: %w, body: %s", err, string(body))
-	}
-
-	if result.Error.Message != "" {
-		return "", fmt.Errorf("error dari Gemini: %s", result.Error.Message)
-	}
-
-	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("Gemini tidak mengembalikan teks")
-	}
-
-	return result.Candidates[0].Content.Parts[0].Text, nil
-}
-
 // ======================== FUNGSI UTAMA ========================
 
 func BusinessMessageHandler(ctx context.Context, tgClient *tg.Client, update *tg.UpdateBotNewBusinessMessage, entities tg.Entities, logger *zap.Logger) error {
@@ -260,6 +88,18 @@ func BusinessMessageHandler(ctx context.Context, tgClient *tg.Client, update *tg
 			return nil
 		}
 	}
+
+	// ===== CEK STATUS OWNER SEBELUM PROSES PESAN =====
+	// Jika owner online atau mode manual, bot tidak proses pesan
+	if !cache.ShouldBotReply() {
+		logger.Info("Bot skip business message: owner online atau mode manual",
+			zap.String("conn_id", connID),
+			zap.Bool("owner_online", cache.IsOwnerOnline()),
+			zap.String("bot_mode", cache.GetBotMode()),
+		)
+		return nil
+	}
+	// ===== END CEK STATUS OWNER =====
 
 	// 1. CEK STIKER (harus sebelum guard teks kosong)
 	if isSticker(msg) {
@@ -345,7 +185,7 @@ func BusinessMessageHandler(ctx context.Context, tgClient *tg.Client, update *tg
 		}
 	}
 
-	shouldReply := !config.IsSupportedURL(text) && !isCommand(text) && matchKeyword(text)
+	shouldReply := !config.IsSupportedURL(text) && !isCommand(text)
 
 	logger.Info("Reply decision (AI)",
 		zap.Bool("should_reply", shouldReply),
@@ -353,19 +193,25 @@ func BusinessMessageHandler(ctx context.Context, tgClient *tg.Client, update *tg
 	)
 
 	if shouldReply {
+
 		if state != nil && state.Rights != nil && state.Rights.Reply {
-			aiReply, err := generateAIReply(ctx, text)
+			aiCtx, aiCancel := context.WithTimeout(ctx, 35*time.Second)
+			defer aiCancel()
+			aiReply, provider, err := GenerateWithFallback(aiCtx, text, logger)
 
 			var finalReply string
 			if err != nil {
-				logger.Warn("AI gagal, pakai fallback", zap.Error(err))
+				logger.Warn("Semua AI provider gagal, pakai fallback", zap.Error(err))
 				finalReply = "Maaf, AI sedang sibuk. Pesan akan dibalas nanti oleh admin."
 			} else {
 				finalReply = aiReply
-				logger.Info("AI reply generated", zap.String("reply", finalReply))
+				logger.Info("AI reply generated",
+					zap.String("provider", provider),
+					zap.String("reply", finalReply),
+				)
 			}
 
-			if err := randomDelay(ctx, 3, 10); err != nil {
+			if err := randomDelay(ctx, 20, 45); err != nil {
 				return err
 			}
 
@@ -474,40 +320,10 @@ func sendBusinessSticker(ctx context.Context, tgClient *tg.Client, connID string
 	return tgClient.Invoker().Invoke(ctx, wrapped, &box)
 }
 
-// ======================== LOGIKA REPLY TEKS ========================
-
-func determineReply(text string) (string, bool) {
-	if config.IsSupportedURL(text) || isCommand(text) {
-		return "", false
-	}
-	if matchKeyword(text) {
-		return "Chat akan di balas kalau saya Online, pesan otomatis.", true
-	}
-	return "", false
-}
-
 func isCommand(text string) bool {
 	prefixes := []string{"/", ".", "!", "#"}
 	for _, p := range prefixes {
 		if strings.HasPrefix(text, p) {
-			return true
-		}
-	}
-	return false
-}
-
-// matchKeyword mendukung pencocokan kata tunggal maupun frasa (multi-word)
-func matchKeyword(text string) bool {
-	cleaned := strings.ToLower(strings.TrimSpace(text))
-	// 1. Cek per kata
-	for _, word := range strings.Fields(cleaned) {
-		if keywordMap[word] {
-			return true
-		}
-	}
-	// 2. Cek frasa (key yang mengandung spasi)
-	for key := range keywordMap {
-		if strings.Contains(key, " ") && strings.Contains(cleaned, key) {
 			return true
 		}
 	}
