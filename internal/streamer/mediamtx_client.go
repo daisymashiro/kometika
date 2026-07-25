@@ -20,19 +20,19 @@ type MediaMTXClient struct {
 
 // StreamInfo berisi informasi tentang stream yang sedang berjalan
 type StreamInfo struct {
-	Name        string    `json:"name"`
-	Ready       bool      `json:"ready"`
-	ReadyTime   time.Time `json:"readyTime"`
-	Tracks      int       `json:"tracks"`
-	BytesRead   int64     `json:"bytesRead"`
-	BytesWritten int64    `json:"bytesWritten"`
-	Readers     int       `json:"readers"`
+	Name         string    `json:"name"`
+	Ready        bool      `json:"ready"`
+	ReadyTime    time.Time `json:"readyTime"`
+	Tracks       int       `json:"tracks"`
+	BytesRead    int64     `json:"bytesRead"`
+	BytesWritten int64     `json:"bytesWritten"`
+	Readers      int       `json:"readers"`
 }
 
 // PathsResponse adalah response dari /v3/paths/list
 type PathsResponse struct {
-	PageCount int                    `json:"pageCount"`
-	ItemCount int                    `json:"itemCount"`
+	PageCount int                     `json:"pageCount"`
+	ItemCount int                     `json:"itemCount"`
 	Items     []map[string]StreamInfo `json:"items"`
 }
 
@@ -50,7 +50,7 @@ func NewMediaMTXClient(baseURL string, logger *zap.Logger) *MediaMTXClient {
 // GetStreamInfo mendapatkan informasi stream berdasarkan nama path
 func (c *MediaMTXClient) GetStreamInfo(ctx context.Context, streamName string) (*StreamInfo, error) {
 	url := fmt.Sprintf("%s/v3/paths/get/%s", c.baseURL, streamName)
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -82,7 +82,7 @@ func (c *MediaMTXClient) GetStreamInfo(ctx context.Context, streamName string) (
 // ListStreams mendapatkan daftar semua stream yang aktif
 func (c *MediaMTXClient) ListStreams(ctx context.Context) ([]StreamInfo, error) {
 	url := fmt.Sprintf("%s/v3/paths/list", c.baseURL)
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -127,7 +127,7 @@ func (c *MediaMTXClient) IsStreamActive(ctx context.Context, streamName string) 
 // WaitForStreamReady menunggu hingga stream ready atau timeout
 func (c *MediaMTXClient) WaitForStreamReady(ctx context.Context, streamName string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -154,14 +154,14 @@ func (c *MediaMTXClient) GetStreamStats(ctx context.Context, streamName string) 
 	}
 
 	stats := map[string]interface{}{
-		"name":           info.Name,
-		"ready":          info.Ready,
-		"ready_time":     info.ReadyTime,
-		"tracks":         info.Tracks,
-		"bytes_read":     info.BytesRead,
-		"bytes_written":  info.BytesWritten,
-		"readers":        info.Readers,
-		"duration":       time.Since(info.ReadyTime).String(),
+		"name":          info.Name,
+		"ready":         info.Ready,
+		"ready_time":    info.ReadyTime,
+		"tracks":        info.Tracks,
+		"bytes_read":    info.BytesRead,
+		"bytes_written": info.BytesWritten,
+		"readers":       info.Readers,
+		"duration":      time.Since(info.ReadyTime).String(),
 	}
 
 	return stats, nil

@@ -592,9 +592,15 @@ func handleCallbackQuery(ctx context.Context, tgClient *tg.Client, query *tg.Upd
 			return nil
 		}
 
-		// Lempar ke YouTube Callback Handler menggunakan Background context
-		// agar tidak terpotong oleh timeout callback dari Telegram
 		return commands.HandleYouTubeLiveCallback(context.Background(), tgClient, peer, query.MsgID, query, logger)
+	}
+
+	if bytes.HasPrefix(data, []byte("botmode_")) {
+		peer := &tg.InputPeerUser{
+			UserID: query.UserID,
+		}
+
+		return commands.HandleBotModeCallback(context.Background(), tgClient, peer, query.MsgID, query, logger)
 	}
 
 	if bytes.HasPrefix(data, []byte("tb_")) {

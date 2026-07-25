@@ -61,6 +61,8 @@ func (r *CommandRouter) RouteCommand(ctx context.Context, msg *tg.Message, entit
 		return r.handleGetID(ctx, msg, entities, user)
 	case "play":
 		return r.handlePlay(ctx, msg, entities, args)
+	case "music", "playmusic":
+		return r.handleMusic(ctx, msg, entities, args)
 	case "botmode":
 		return r.handleBotMode(ctx, msg, entities)
 	default:
@@ -293,4 +295,20 @@ func getChannelUsername(channel *tg.Channel) string {
 
 func (r *CommandRouter) handleBotMode(ctx context.Context, msg *tg.Message, entities tg.Entities) error {
 	return HandleBotModeCommand(ctx, r.client, msg, entities, r.rootID, r.logger)
+}
+
+func (r *CommandRouter) handleMusic(ctx context.Context, msg *tg.Message, entities tg.Entities, args []string) error {
+
+	if len(args) < 1 {
+		peer, _ := GetPeerFromMessage(ctx, r.client, msg, entities)
+		if peer != nil {
+			replyTo := buildReplyTo(msg.ID, getTopicID(msg))
+			_ = sendGroupText(ctx, r.client, peer, "❌ Format salah.\nGunakan: .music <url_youtube>", replyTo)
+		}
+		return nil
+	}
+
+	url := args[0]
+	// Panggil handler music yang baru kita buat
+	return HandleMusicCommand(ctx, r.client, msg, entities, url, r.logger)
 }

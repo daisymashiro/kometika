@@ -12,12 +12,13 @@ import (
 )
 
 type Resource struct {
-	ID      string  `json:"id"`
-	Type    string  `json:"type"`
-	Format  string  `json:"format"`
-	Quality string  `json:"quality"`
-	URL     string  `json:"url"`
-	SizeMB  float64 `json:"sizeMB"`
+	ID             string  `json:"id"`
+	Type           string  `json:"type"`
+	Format         string  `json:"format"`
+	OriginalFormat string  `json:"original_format"`
+	Quality        string  `json:"quality"`
+	URL            string  `json:"url"`
+	SizeMB         float64 `json:"sizeMB"`
 }
 
 type VideoData struct {
@@ -30,10 +31,11 @@ type VideoData struct {
 }
 
 type vidssaveMediaResource struct {
-	Format      string `json:"format"`
-	Quality     string `json:"quality"`
-	DownloadURL string `json:"download_url"`
-	Size        int64  `json:"size"`
+	Format         string `json:"format"`
+	OriginalFormat string `json:"original_format"`
+	Quality        string `json:"quality"`
+	DownloadURL    string `json:"download_url"`
+	Size           int64  `json:"size"`
 }
 
 type vidssaveMediaItem struct {
@@ -53,12 +55,13 @@ type vidssaveData struct {
 }
 
 type vidssaveResource struct {
-	ResourceID  string `json:"resource_id"`
-	Format      string `json:"format"`
-	Quality     string `json:"quality"`
-	DownloadURL string `json:"download_url"`
-	Type        string `json:"type"`
-	Size        int64  `json:"size"`
+	ResourceID     string `json:"resource_id"`
+	Format         string `json:"format"`
+	OriginalFormat string `json:"original_format"`
+	Quality        string `json:"quality"`
+	DownloadURL    string `json:"download_url"`
+	Type           string `json:"type"`
+	Size           int64  `json:"size"`
 }
 
 type vidssaveResponse struct {
@@ -156,12 +159,13 @@ func FetchYouTubeData(videoURL string) (*VideoData, error) {
 				continue
 			}
 			item := Resource{
-				ID:      r.ResourceID,
-				Type:    r.Type,
-				Format:  r.Format,
-				Quality: r.Quality,
-				URL:     r.DownloadURL,
-				SizeMB:  float64(int((float64(r.Size)/1024/1024)*100+0.5)) / 100,
+				ID:             r.ResourceID,
+				Type:           r.Type,
+				Format:         r.Format,
+				OriginalFormat: r.OriginalFormat,
+				Quality:        r.Quality,
+				URL:            r.DownloadURL,
+				SizeMB:         float64(int((float64(r.Size)/1024/1024)*100+0.5)) / 100,
 			}
 			if r.Type == "video" {
 				result.Videos = append(result.Videos, item)

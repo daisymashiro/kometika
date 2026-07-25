@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,19 @@ import (
 	"mybot/internal/log"
 	"mybot/internal/media"
 )
+
+func unescapeUnicodeURL(rawURL string) string {
+	if !strings.Contains(rawURL, `\u`) && !strings.Contains(rawURL, `\`) {
+		return rawURL
+	}
+
+	unquoted, err := strconv.Unquote(`"` + rawURL + `"`)
+	if err != nil {
+		return rawURL
+	}
+
+	return unquoted
+}
 
 func HandleGDNCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, logger *zap.Logger) error {
 	text := msg.Message
@@ -49,7 +63,15 @@ func HandleGDNCommand(ctx context.Context, client *tg.Client, msg *tg.Message, e
 		_ = sendGroupText(ctx, client, peer, "❌ Format salah.\nGunakan: .gdn url", replyTo)
 		return nil
 	}
-	targetURL := parts[1]
+
+	rawURL := parts[1]
+
+	targetURL := unescapeUnicodeURL(rawURL)
+
+	logger.Debug("URL berhasil diparsing",
+		zap.String("raw", rawURL),
+		zap.String("clean", targetURL),
+	)
 
 	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		_ = sendGroupText(ctx, client, peer, "❌ URL tidak valid. Harus diawali http:// atau https://", replyTo)
@@ -89,7 +111,6 @@ func HandleGDNCommand(ctx context.Context, client *tg.Client, msg *tg.Message, e
 
 	if isM3U8 {
 		var errM3U8 error
-		// FIX BUG 1: Mengirimkan pointer logger ke FFmpeg compiler
 		stream, errM3U8 = api.GetM3U8ToMP4Stream(ctx, targetURL, logger)
 		if errM3U8 != nil {
 			logger.Error("Gagal inisialisasi FFmpeg untuk M3U8", zap.Error(errM3U8))
@@ -99,7 +120,6 @@ func HandleGDNCommand(ctx context.Context, client *tg.Client, msg *tg.Message, e
 		}
 	} else {
 		var errStream error
-		// FIX BUG 3: Membaca stream menggunakan fungsi baru pembaca Header HTTP
 		stream, _, httpContentType, errStream = api.GetVideoStreamWithHeader(ctx, targetURL)
 		if errStream != nil {
 			logger.Error("Gagal membuka URL CDN", zap.Error(errStream))
@@ -124,14 +144,11 @@ func HandleGDNCommand(ctx context.Context, client *tg.Client, msg *tg.Message, e
 		var errDetect error
 		info, fullStream, errDetect = api.DetectAndClassifyStream(stream)
 
-		// FIX BUG 3: Jika magic number gagal mendeteksi (menghasilkan binary/unknown) atau terjadi error pembacaan awal
 		if errDetect != nil || info.Category == api.ContentUnknown || info.Category == api.ContentBinary {
-			// Periksa apakah HTTP Content-Type bawaan CDN valid untuk dipergunakan
 			if httpContentType != "" && !strings.Contains(httpContentType, "octet-stream") && !strings.Contains(httpContentType, "application/json") {
 				info = api.GetContentTypeInfo(httpContentType)
 				logger.Info("Magic number gagal, fallback ke HTTP Header sukses", zap.String("mime", info.MimeType))
 			} else {
-				// Paksa asumsi aman ke Video MP4 jika tipe konten benar-benar tidak terbaca namun dipanggil via .gdn
 				info = api.ContentTypeInfo{
 					MimeType:  "video/mp4",
 					Category:  api.ContentVideo,
@@ -181,7 +198,6 @@ func HandleGDNCommand(ctx context.Context, client *tg.Client, msg *tg.Message, e
 
 	if err != nil {
 		logger.Error("Gagal mengirim file GDN", zap.Error(err))
-		// Integrasi penuh dengan internal log milikmu menggunakan format Blockquote Telegram asli
 		log.LogError(ctx, "GDN_SendFile", err, "url="+targetURL, "file="+filename, "mime_type="+info.MimeType)
 
 		_ = sendGroupText(ctx, client, peer, "❌ Gagal mengirim file dari CDN. Koneksi terputus atau file terlalu besar.", replyTo)
