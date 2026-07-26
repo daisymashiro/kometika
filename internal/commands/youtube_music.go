@@ -3,112 +3,120 @@ package commands
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
+	"time"
 
-	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
+	"github.com/kkdai/youtube/v2"
 	"go.uber.org/zap"
 
 	"mybot/internal/api"
-	"mybot/internal/api/youtube"
+	"mybot/internal/log"
 	"mybot/internal/media"
 )
 
-// HandleMusicCommand menangani perintah .music <url>
-func HandleMusicCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string, logger *zap.Logger) error {
+func HandleMusicCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, targetUrl string, logger *zap.Logger) error {
 	peer, err := GetPeerFromMessage(ctx, client, msg, entities)
 	if err != nil || peer == nil {
 		return err
 	}
-
 	replyTo := buildReplyTo(msg.ID, getTopicID(msg))
 
-	// 1. Kirim Pesan Loading
-	loadingMsgID, _ := sendLoadingMessage(ctx, client, peer, "🎵 Mengambil data musik dari YouTube", replyTo, logger)
+	loadingMsgID, _ := sendLoadingMessage(ctx, client, peer, "⏳ Mengambil data musik dari YouTube...", replyTo, logger)
 
-	// 2. Fetch Data dari YouTube
-	ytData, err := youtube.FetchYouTubeData(url)
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	customTransport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", addr)
+		},
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	httpClient := &http.Client{
+		Transport: customTransport,
+		Timeout:   60 * time.Second,
+	}
+
+	ytClient := youtube.Client{
+		HTTPClient: httpClient, // Masukkan custom client ke sini
+	}
+
+	video, err := ytClient.GetVideo(targetUrl)
 	if err != nil {
-		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Gagal mengambil data YouTube.", logger)
+		logger.Error("Gagal mengambil data video YouTube", zap.Error(err))
+		log.LogError(ctx, "YoutubeMusic_GetVideo", err, "url="+targetUrl)
+
+		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Gagal mengambil data dari YouTube.", logger)
 		return err
 	}
 
-	if len(ytData.Audios) == 0 {
-		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Tidak ada format audio yang tersedia.", logger)
-		return nil
-	}
+	var audioFormat *youtube.Format
+	formats := video.Formats.WithAudioChannels()
 
-	// 3. Pilih Audio Kualitas Terbaik (M4A/AAC lebih aman untuk pemutar musik bawaan Telegram)
-	var audioTargetURL string
-	for _, a := range ytData.Audios {
-		format := strings.ToLower(a.Format)
-		// Jika Anda sudah menambahkan OriginalFormat di youtube.go, gunakan itu.
-		// Jika belum, cek format/url untuk m4a/aac.
-		if strings.Contains(format, "m4a") || strings.Contains(format, "aac") {
-			audioTargetURL = a.URL
+	for i, f := range formats {
+		if strings.Contains(f.MimeType, "audio/mp4") {
+			audioFormat = &formats[i]
 			break
 		}
 	}
 
-	// Fallback jika M4A tidak ada
-	if audioTargetURL == "" {
-		audioTargetURL = ytData.Audios[0].URL
+	if audioFormat == nil && len(formats) > 0 {
+		audioFormat = &formats[0]
 	}
 
-	_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "🎧 Mengunduh dan mengirim musik", logger)
+	if audioFormat == nil {
+		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Tidak ada format audio yang tersedia.", logger)
+		return nil
+	}
 
-	// 4. Buka Aliran Jaringan (Pipe) Langsung ke CDN YouTube (Zero-Disk)
-	stream, _, err := api.GetVideoStream(ctx, audioTargetURL)
+	_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "⏳ Mengunduh dan mengirim musik...", logger)
+
+	stream, _, err := ytClient.GetStream(video, audioFormat)
 	if err != nil {
-		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Gagal membuka aliran audio.", logger)
+		logger.Error("Gagal membuka aliran stream", zap.Error(err))
+		log.LogError(ctx, "YoutubeMusic_GetStream", err, "url="+targetUrl)
+
+		_ = EditLoadingMessage(ctx, client, peer, loadingMsgID, "❌ Gagal membuka aliran stream audio.", logger)
 		return err
 	}
 	defer stream.Close()
 
-	// 5. Unduh Thumbnail sebagai Cover Album (Opsional)
-	var thumbFile tg.InputFileClass
-	if ytData.Thumbnail != "" {
-		thumbBytes, err := api.GetThumbnail(ctx, ytData.Thumbnail)
-		if err == nil && len(thumbBytes) > 0 {
-			up := uploader.NewUploader(client).WithThreads(1)
-			thumbFile, _ = up.FromBytes(ctx, "cover.jpg", thumbBytes)
-		}
-	}
-
-	// 6. RAHASIA: Set Kategori ke Audio agar Telegram merendernya sebagai Music Player
 	info := api.ContentTypeInfo{
-		MimeType:  "audio/mp4", // M4A menggunakan mime type audio/mp4
+		MimeType:  "audio/mp4",
 		Category:  api.ContentAudio,
 		Extension: ".m4a",
 	}
 
-	filename := fmt.Sprintf("%s.m4a", ytData.ID)
-	caption := fmt.Sprintf("🎵 %s \n\n@Kometika_bot", ytData.Title)
+	filename := fmt.Sprintf("%s.m4a", video.ID)
+	caption := fmt.Sprintf("🎵 %s \n\n@Kometika_bot", video.Title)
 
 	mediaSender := media.NewMediaSender(client)
 
-	// 7. Kirim secara dinamis (Streaming dari Google langsung ke Telegram)
 	_, err = mediaSender.SendDynamicStream(
-		ctx,
-		peer,
-		stream,
-		info,
-		filename,
-		caption,
-		nil,
-		replyTo,
-		thumbFile, // Gambar ini otomatis jadi Cover MP3
+		ctx, peer, stream, info, filename, caption, nil, replyTo, nil,
 	)
 
-	// Hapus pesan loading setelah selesai
+	// Hapus pesan loading
 	deleteGroupMessage(ctx, client, peer, loadingMsgID)
 
 	if err != nil {
-		logger.Error("Gagal mengirim file audio", zap.Error(err))
-		_ = sendGroupText(ctx, client, peer, "❌ Gagal mengirim musik ke grup.", replyTo)
+		logger.Error("Gagal mengirim file audio ke Telegram", zap.Error(err))
+		log.LogError(ctx, "YoutubeMusic_UploadToTG", err, "url="+targetUrl)
+
+		_ = sendGroupText(ctx, client, peer, "❌ Gagal mengirim musik ke grup. Koneksi terputus.", replyTo)
 		return err
 	}
 
-	logger.Info("Musik YouTube berhasil dikirim", zap.String("id", ytData.ID))
+	logger.Info("Musik YouTube berhasil dikirim", zap.String("id", video.ID))
 	return nil
 }

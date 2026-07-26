@@ -45,11 +45,11 @@ func processFacebook(ctx context.Context, client *tg.Client, lc *LoadingContext,
 	logger.Info("Memproses Facebook", zap.String("url", url))
 
 	// Mengambil data menggunakan sistem fallback
-	data, err := facebook.FetchFacebookWithFallback(logger, url)
+	data, err := facebook.FetchFacebookWithFallback(ctx, logger, url)
 	if err != nil {
 		logger.Warn("Gagal fetch data Facebook", zap.Error(err))
 		log.LogError(ctx, "FacebookFetch", err, "url="+url)
-		
+
 		if lc.ProgressMsgID != 0 {
 			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengambil data dari Facebook.", logger)
 		}
@@ -103,7 +103,7 @@ func processFacebook(ctx context.Context, client *tg.Client, lc *LoadingContext,
 	if err != nil {
 		logger.Error("Gagal mengirim video Facebook", zap.Error(err))
 		log.LogError(ctx, "Facebook.SendVideo", err, "url="+url)
-		
+
 		if lc.ProgressMsgID != 0 {
 			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim video.", logger)
 		}

@@ -196,7 +196,7 @@ func processGuestTikTok(ctx context.Context, client *tg.Client, inlineMsgID tg.I
 
 func processGuestInstagram(ctx context.Context, client *tg.Client, inlineMsgID tg.InputBotInlineMessageIDClass, url string, logger *zap.Logger) error {
 	editGuestInlineText(ctx, client, inlineMsgID, "🔍 Mendeteksi Instagram...")
-	data, err := instagram.FetchInstagramDataWithFallback(url)
+	data, err := instagram.FetchInstagramDataWithFallback(ctx, url)
 	if err != nil {
 		return err
 	}
@@ -254,7 +254,7 @@ func processGuestInstagram(ctx context.Context, client *tg.Client, inlineMsgID t
 
 func processGuestFacebook(ctx context.Context, client *tg.Client, inlineMsgID tg.InputBotInlineMessageIDClass, url string, logger *zap.Logger) error {
 	editGuestInlineText(ctx, client, inlineMsgID, "🔍 Mendeteksi Facebook...")
-	data, err := facebook.FetchFacebookWithFallback(logger, url)
+	data, err := facebook.FetchFacebookWithFallback(ctx, logger, url)
 	if err != nil {
 		return err
 	}

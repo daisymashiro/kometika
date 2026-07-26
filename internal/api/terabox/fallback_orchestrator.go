@@ -1,44 +1,44 @@
 package terabox
 
 import (
+	"context"
 	"fmt"
+	"time"
+
 	"go.uber.org/zap"
+
 	"mybot/internal/api"
+	"mybot/internal/log"
 )
 
-// log adalah logger global untuk package terabox
-var log *zap.Logger
+var loggerPtr *zap.Logger
+var teraboxBreaker = api.NewCircuitBreaker(3, 5*time.Minute)
 
-// Circuit breaker global untuk Terabox APIs
-var teraboxBreaker = api.NewCircuitBreaker(3, 5*60) // 3 kegagalan, cooldown 5 menit
-
-// SetLogger digunakan oleh main untuk menginjeksi logger ke package ini
 func SetLogger(l *zap.Logger) {
-	log = l
+	loggerPtr = l
 }
 
-// helper logging internal (aman jika log nil)
 func logInfo(msg string, fields ...zap.Field) {
-	if log != nil {
-		log.Info(msg, fields...)
+	if loggerPtr != nil {
+		loggerPtr.Info(msg, fields...)
 	}
 }
 
 func logWarn(msg string, fields ...zap.Field) {
-	if log != nil {
-		log.Warn(msg, fields...)
+	if loggerPtr != nil {
+		loggerPtr.Warn(msg, fields...)
 	}
 }
 
 func logError(msg string, fields ...zap.Field) {
-	if log != nil {
-		log.Error(msg, fields...)
+	if loggerPtr != nil {
+		loggerPtr.Error(msg, fields...)
 	}
 }
 
-// FetchTeraboxUniversal mencoba semua API dengan circuit breaker
 func FetchTeraboxUniversal(teraboxURL string) ([]TeraboxUniversalData, error) {
-	// Daftar API dalam urutan prioritas
+	ctx := context.Background()
+
 	apis := []struct {
 		name string
 		fn   func(string) ([]TeraboxUniversalData, error)
@@ -51,14 +51,19 @@ func FetchTeraboxUniversal(teraboxURL string) ([]TeraboxUniversalData, error) {
 
 	var lastErr error
 	for _, apiItem := range apis {
-		// Cek circuit breaker
 		if !teraboxBreaker.CanAttempt(apiItem.name) {
-			failures, inCooldown := teraboxBreaker.GetStatus(apiItem.name)
+			failures, state, cooldownEnds := teraboxBreaker.GetStatus(apiItem.name)
+			sisaWaktu := time.Until(cooldownEnds).Round(time.Second)
+
 			logWarn("API Terabox di-skip (circuit breaker)",
 				zap.String("api", apiItem.name),
 				zap.Int("failures", failures),
-				zap.Bool("in_cooldown", inCooldown),
+				zap.Any("state", state),
+				zap.Duration("sisa_waktu", sisaWaktu),
 			)
+
+			logMsg := fmt.Sprintf("API Terabox %s sedang cooldown. State: %d. Sisa waktu: %s", apiItem.name, state, sisaWaktu)
+			log.LogWarn(ctx, "Terabox_CircuitBreaker", logMsg, fmt.Sprintf("failures=%d", failures))
 			continue
 		}
 
@@ -73,14 +78,18 @@ func FetchTeraboxUniversal(teraboxURL string) ([]TeraboxUniversalData, error) {
 
 		lastErr = err
 		teraboxBreaker.RecordFailure(apiItem.name)
+
 		logWarn("API gagal", zap.String("api", apiItem.name), zap.Error(err))
+
+		log.LogError(ctx, "Terabox_API_Gagal", err, "api="+apiItem.name, "url="+teraboxURL)
 	}
+
+	log.LogError(ctx, "Terabox_Semua_API_Gagal", lastErr, "url="+teraboxURL)
 	return nil, fmt.Errorf("semua API gagal: %v", lastErr)
 }
 
-// fetchFlowVideoPlayerUniversal adalah adapter untuk mengkonversi Result ke TeraboxUniversalData
 func fetchFlowVideoPlayerUniversal(teraboxURL string) ([]TeraboxUniversalData, error) {
-	results, err := FetchMedia(teraboxURL) // dari flowvideoplayer.go
+	results, err := FetchMedia(teraboxURL)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +100,6 @@ func fetchFlowVideoPlayerUniversal(teraboxURL string) ([]TeraboxUniversalData, e
 	return universal, nil
 }
 
-// ResultToUniversal mengkonversi tipe Result ke TeraboxUniversalData
 func ResultToUniversal(r Result) TeraboxUniversalData {
 	return TeraboxUniversalData{
 		ID:          r.ID,
@@ -103,7 +111,7 @@ func ResultToUniversal(r Result) TeraboxUniversalData {
 	}
 }
 
-// ResetCircuitBreaker mereset circuit breaker untuk API tertentu (untuk debugging)
 func ResetCircuitBreaker(apiName string) {
 	teraboxBreaker.Reset(apiName)
 }
+

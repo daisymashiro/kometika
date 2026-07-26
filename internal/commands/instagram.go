@@ -60,7 +60,7 @@ func processInstagram(
 ) error {
 	logger.Info("Memproses Instagram", zap.String("url", url))
 
-	data, err := instagram.FetchInstagramDataWithFallback(url)
+	data, err := instagram.FetchInstagramDataWithFallback(ctx, url)
 	if err != nil {
 		logger.Error("Gagal fetch data Instagram", zap.Error(err))
 		log.LogError(ctx, "Instagram.FetchInstagramDataWithFallback", err, "url="+url)
