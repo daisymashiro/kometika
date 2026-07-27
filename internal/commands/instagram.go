@@ -523,8 +523,8 @@ func trimInstagramTitle(title string) string {
 	}
 
 	runes := []rune(title)
-	if len(runes) > 400 {
-		return string(runes[:400]) + "..."
+	if len(runes) > 1000 {
+		return string(runes[:1000]) + "..."
 	}
 
 	return title

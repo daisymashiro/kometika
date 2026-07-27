@@ -20,15 +20,15 @@ func FetchInstagramDataWithFallback(ctx context.Context, instaURL string) (*Univ
 		name string
 		fn   func(string) (*UniversalInstagramData, error)
 	}{
+		{"FASTDL", FetchFastdlApp},
+		{"FastVidioSave", FetchFastVidioSave},
 		{"DanzyAPI", FetchInstagramFromDanzy},
-
 		{"Download Gram ORG", FetchInstagramFromDownloadGram},
 		{"Downr Downloader", FetchDownr},
 		{"Siputzx_fastdl", FetchInstagramFromFastdl},
 		{"IgramFetch", FetchIgram}, // igram gagal vidio
 		{"FetchIgramStory", FetchIgramStory},
 		{"NexRay", FetchInstagramFromNexRay}, //nexray gagal membaca url setelah dalam fetch /?
-		{"FastVidioSave", FetchFastVidioSave},
 	}
 
 	var lastErr error
@@ -89,4 +89,3 @@ func FetchInstagramDataWithFallback(ctx context.Context, instaURL string) (*Univ
 func ResetCircuitBreaker(apiName string) {
 	igBreaker.Reset(apiName)
 }
-

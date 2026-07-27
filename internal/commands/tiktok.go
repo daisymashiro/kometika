@@ -55,7 +55,7 @@ func processTikTok(ctx context.Context, client *tg.Client, lc *LoadingContext, u
 	if err != nil {
 		logger.Warn("Semua API gagal", zap.Error(err))
 		log.LogError(ctx, "TikTok.FetchData", err, "url="+url)
-		
+
 		// Edit pesan loading menjadi error
 		if lc.ProgressMsgID != 0 {
 			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengambil data dari TikTok.", logger)
@@ -68,8 +68,8 @@ func processTikTok(ctx context.Context, client *tg.Client, lc *LoadingContext, u
 	}
 
 	title := data.Title
-	if len(title) > 400 {
-		title = title[:400] + "..."
+	if len(title) > 1000 {
+		title = title[:1000] + "..."
 	}
 
 	// Album handler
@@ -77,7 +77,7 @@ func processTikTok(ctx context.Context, client *tg.Client, lc *LoadingContext, u
 		if lc.ProgressMsgID != 0 {
 			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh album...", logger)
 		}
-		
+
 		err = kirimAlbumStream(ctx, client, lc.Peer, title, data.ImageURLs, lc.ReplyTo, logger)
 		if err != nil {
 			logger.Error("Gagal kirim album", zap.Error(err))
