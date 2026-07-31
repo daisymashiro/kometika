@@ -55,7 +55,6 @@ func normalizeFeatureName(f string) string {
 	return f
 }
 
-// HandleFeaturesCommand menampilkan status semua fitur
 func HandleFeaturesCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, logger *zap.Logger) error {
 	peer, err := GetPeerFromMessage(ctx, client, msg, entities)
 	if err != nil || peer == nil {
@@ -64,7 +63,6 @@ func HandleFeaturesCommand(ctx context.Context, client *tg.Client, msg *tg.Messa
 	}
 
 	fm := config.GetFeatureManager()
-	features := fm.GetAll()
 
 	var sb strings.Builder
 	sb.WriteString("  <b>Status Fitur Downloader</b>\n\n")
@@ -73,9 +71,12 @@ func HandleFeaturesCommand(ctx context.Context, client *tg.Client, msg *tg.Messa
 	featureList := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
 	for _, feature := range featureList {
 		status := "  Nonaktif"
-		if enabled, exists := features[feature]; exists && enabled {
+
+		// PERBAIKAN: Gunakan fungsi IsEnabled() langsung
+		if fm.IsEnabled(feature) {
 			status = "  Aktif"
 		}
+
 		sb.WriteString(fmt.Sprintf("  %s: %s\n", strings.Title(feature), status))
 	}
 
@@ -173,4 +174,3 @@ func GetUserIDFromMessage(msg *tg.Message) int64 {
 		return 0
 	}
 }
-

@@ -4,21 +4,23 @@ import (
 	"database/sql"
 	"log"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 var DB *sql.DB
 
 func InitDB(dbPath string) {
 	var err error
-	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
 
-	DB, err = sql.Open("sqlite3", dsn)
+	DB, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		log.Fatalf("Gagal membuka database: %v", err)
 	}
 
 	DB.SetMaxOpenConns(1)
+
+	_, _ = DB.Exec("PRAGMA journal_mode=WAL;")
+	_, _ = DB.Exec("PRAGMA busy_timeout=5000;")
 
 	createTableQuery := `
 	CREATE TABLE IF NOT EXISTS feature_toggles (
