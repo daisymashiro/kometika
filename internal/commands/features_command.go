@@ -35,6 +35,26 @@ func IsOwner(userID int64) bool {
 	return ownerID != 0 && userID == ownerID
 }
 
+// normalizeFeatureName mengubah alias (fb, ig, tt) menjadi nama fitur penuh
+func normalizeFeatureName(f string) string {
+	f = strings.ToLower(strings.TrimSpace(f))
+	switch f {
+	case "fb":
+		return "facebook"
+	case "ig":
+		return "instagram"
+	case "tt":
+		return "tiktok"
+	case "tw", "x":
+		return "twitter"
+	case "lulu":
+		return "lulustream"
+	case "tera":
+		return "terabox"
+	}
+	return f
+}
+
 // HandleFeaturesCommand menampilkan status semua fitur
 func HandleFeaturesCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, logger *zap.Logger) error {
 	peer, err := GetPeerFromMessage(ctx, client, msg, entities)
@@ -47,23 +67,23 @@ func HandleFeaturesCommand(ctx context.Context, client *tg.Client, msg *tg.Messa
 	features := fm.GetAll()
 
 	var sb strings.Builder
-	sb.WriteString("📋 <b>Status Fitur Downloader</b>\n\n")
+	sb.WriteString("  <b>Status Fitur Downloader</b>\n\n")
 
 	// Urutkan fitur
 	featureList := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
-
 	for _, feature := range featureList {
-		status := "❌ Nonaktif"
+		status := "  Nonaktif"
 		if enabled, exists := features[feature]; exists && enabled {
-			status = "✅ Aktif"
+			status = "  Aktif"
 		}
-		sb.WriteString(fmt.Sprintf("• <b>%s</b>: %s\n", strings.Title(feature), status))
+		sb.WriteString(fmt.Sprintf("  %s: %s\n", strings.Title(feature), status))
 	}
 
-	sb.WriteString("\n<i>Hanya owner yang dapat mengubah status fitur</i>")
+	sb.WriteString("\nHanya owner yang dapat mengubah status fitur")
 
-	msgSender := message.NewSender(client)
-	_, err = msgSender.To(peer).StyledText(ctx, htmlparser.String(nil, sb.String()))
+	// Pastikan bot melakukan Reply ke pesan awal agar topic/pesan spesifik terdeteksi
+	msgSender := message.NewSender(client).To(peer).Reply(msg.ID)
+	_, err = msgSender.StyledText(ctx, htmlparser.String(nil, sb.String()))
 	return err
 }
 
@@ -74,80 +94,69 @@ func HandleListStatusCommand(ctx context.Context, client *tg.Client, msg *tg.Mes
 
 // HandleFeatureOnCommand mengaktifkan fitur (hanya owner)
 func HandleFeatureOnCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, args []string, logger *zap.Logger) error {
-	// Cek apakah user adalah owner
-
-	if len(args) < 1 {
-		peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
-		if peer != nil {
-			msgSender := message.NewSender(client)
-			_, _ = msgSender.To(peer).Text(ctx, "ℹ️ Penggunaan: /on <nama_fitur>\nContoh: /on tiktok")
-		}
+	peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
+	if peer == nil {
 		return nil
 	}
 
-	feature := strings.ToLower(args[0])
+	// Buat sender yang me-reply pesan command
+	msgSender := message.NewSender(client).To(peer).Reply(msg.ID)
+
+	// Cek apakah argumen tersedia
+	if len(args) < 1 {
+		_, _ = msgSender.Text(ctx, "  Penggunaan: /on <nama_fitur>\nContoh: /on tiktok (atau /on tt)")
+		return nil
+	}
+
+	feature := normalizeFeatureName(args[0])
 	fm := config.GetFeatureManager()
 
 	// Validasi nama fitur
 	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
 	isValid := slices.Contains(validFeatures, feature)
 
-	peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
-	msgSender := message.NewSender(client)
-
 	if !isValid {
-		if peer != nil {
-			_, _ = msgSender.To(peer).Text(ctx, fmt.Sprintf("❌ Fitur '%s' tidak ditemukan.\nFitur yang tersedia: %s", feature, strings.Join(validFeatures, ", ")))
-		}
+		_, _ = msgSender.Text(ctx, fmt.Sprintf("  Fitur '%s' tidak ditemukan.\nFitur yang tersedia: %s", feature, strings.Join(validFeatures, ", ")))
 		return nil
 	}
 
 	fm.Enable(feature)
 	logger.Info("Fitur diaktifkan oleh owner", zap.String("feature", feature))
-
-	if peer != nil {
-		_, _ = msgSender.To(peer).StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("✅ Fitur <b>%s</b> telah diaktifkan.", strings.Title(feature))))
-	}
+	_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("  Fitur %s telah diaktifkan.", strings.Title(feature))))
 
 	return nil
 }
 
 // HandleFeatureOffCommand menonaktifkan fitur (hanya owner)
 func HandleFeatureOffCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, args []string, logger *zap.Logger) error {
-	// Cek apakah user adalah owner
-
-	if len(args) < 1 {
-		peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
-		if peer != nil {
-			msgSender := message.NewSender(client)
-			_, _ = msgSender.To(peer).Text(ctx, "ℹ️ Penggunaan: /off <nama_fitur>\nContoh: /off tiktok")
-		}
+	peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
+	if peer == nil {
 		return nil
 	}
 
-	feature := strings.ToLower(args[0])
+	// Buat sender yang me-reply pesan command
+	msgSender := message.NewSender(client).To(peer).Reply(msg.ID)
+
+	if len(args) < 1 {
+		_, _ = msgSender.Text(ctx, "  Penggunaan: /off <nama_fitur>\nContoh: /off tiktok (atau /off tt)")
+		return nil
+	}
+
+	feature := normalizeFeatureName(args[0])
 	fm := config.GetFeatureManager()
 
 	// Validasi nama fitur
 	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
 	isValid := slices.Contains(validFeatures, feature)
 
-	peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
-	msgSender := message.NewSender(client)
-
 	if !isValid {
-		if peer != nil {
-			_, _ = msgSender.To(peer).Text(ctx, fmt.Sprintf("❌ Fitur '%s' tidak ditemukan.\nFitur yang tersedia: %s", feature, strings.Join(validFeatures, ", ")))
-		}
+		_, _ = msgSender.Text(ctx, fmt.Sprintf("  Fitur '%s' tidak ditemukan.\nFitur yang tersedia: %s", feature, strings.Join(validFeatures, ", ")))
 		return nil
 	}
 
 	fm.Disable(feature)
 	logger.Info("Fitur dinonaktifkan oleh owner", zap.String("feature", feature))
-
-	if peer != nil {
-		_, _ = msgSender.To(peer).StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("🚫 Fitur <b>%s</b> telah dinonaktifkan.", strings.Title(feature))))
-	}
+	_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("  Fitur %s telah dinonaktifkan.", strings.Title(feature))))
 
 	return nil
 }
@@ -157,7 +166,6 @@ func GetUserIDFromMessage(msg *tg.Message) int64 {
 	if msg.FromID == nil {
 		return 0
 	}
-
 	switch from := msg.FromID.(type) {
 	case *tg.PeerUser:
 		return from.UserID
@@ -165,3 +173,4 @@ func GetUserIDFromMessage(msg *tg.Message) int64 {
 		return 0
 	}
 }
+

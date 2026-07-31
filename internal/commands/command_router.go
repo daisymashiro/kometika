@@ -51,7 +51,7 @@ func (r *CommandRouter) RouteCommand(ctx context.Context, msg *tg.Message, entit
 		return r.handleStart(ctx, msg, entities, user)
 	case "fiture":
 		return r.handleFeatures(ctx, msg, entities)
-	case "liststatus":
+	case "liststatus", "status":
 		return r.handleListStatus(ctx, msg, entities)
 	case "on":
 		return r.handleOn(ctx, msg, entities, args, user)
@@ -194,7 +194,7 @@ func (r *CommandRouter) handlePlay(ctx context.Context, msg *tg.Message, entitie
 		if peer != nil {
 			// Gunakan helper yang sudah ada di codebase Anda
 			replyTo := buildReplyTo(msg.ID, getTopicID(msg))
-			_ = sendGroupText(ctx, r.client, peer, "⚠️ <b>Format salah.</b>\nGunakan: <code>.play <url_youtube></code>", replyTo)
+			_ = sendGroupText(ctx, r.client, peer, "⚠️ Format salah.\nGunakan: <code>.play <url_youtube></code>", replyTo)
 		}
 		return nil
 	}

@@ -24,3 +24,16 @@ session.json
 *.out
 coverage.out
 vendor/
+
+# db 
+*.db
+*.db-shm
+*.db-wal
+kometika_bot.db
+kometika_bot.db-shm
+kometika_bot.db-wal
+
+.DS_Store
+Thumbs.db
+
+

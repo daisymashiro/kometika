@@ -15,6 +15,7 @@ import (
 	"mybot/internal/cache"
 	"mybot/internal/commands"
 	"mybot/internal/config"
+	"mybot/internal/db"
 	"mybot/internal/log"
 	"mybot/internal/media"
 
@@ -51,7 +52,11 @@ func initLogger() {
 
 	encoder := zapcore.NewJSONEncoder(encoderCfg)
 	core := zapcore.NewCore(encoder, writeSyncer, zapcore.DebugLevel)
-
+	if err := log.InitFirebase(); err == nil {
+		core = zapcore.RegisterHooks(core, log.FirestoreZapHook)
+	} else {
+		fmt.Printf("Peringatan: Firebase tidak aktif, log hanya ke file lokal. Error: %v\n", err)
+	}
 	logger = zap.New(core)
 	zap.ReplaceGlobals(logger)
 }
@@ -302,6 +307,11 @@ func main() {
 
 	initLogger()
 	defer logger.Sync()
+	db.InitDB("kometika_bot.db")
+	defer db.DB.Close()
+
+	fm := config.GetFeatureManager()
+	fm.LoadFromDB()
 
 	jobQueue = make(chan func(), jobQueueSize)
 	var wg sync.WaitGroup

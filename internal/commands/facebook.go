@@ -3,7 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/gotd/td/tg"
@@ -19,14 +18,6 @@ import (
 
 // HandleFacebook adalah entry point utama untuk tautan Facebook.
 func HandleFacebook(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string, logger *zap.Logger) error {
-	lowerURL := strings.ToLower(url)
-
-	if !strings.Contains(lowerURL, "facebook.com") &&
-		!strings.Contains(lowerURL, "fb.watch") &&
-		!strings.Contains(lowerURL, "fb.gg") &&
-		!strings.Contains(lowerURL, "fb.com") {
-		return nil
-	}
 
 	// Cek feature toggle
 	fm := config.GetFeatureManager()
@@ -50,8 +41,11 @@ func processFacebook(ctx context.Context, client *tg.Client, lc *LoadingContext,
 		logger.Warn("Gagal fetch data Facebook", zap.Error(err))
 		log.LogError(ctx, "FacebookFetch", err, "url="+url)
 
+		pesanErrorFB := "  Vidio atau foto mungkin bersifat Privat :<."
 		if lc.ProgressMsgID != 0 {
-			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengambil data dari Facebook.", logger)
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, pesanErrorFB, logger)
+		} else {
+			_ = sendGroupText(ctx, client, lc.Peer, pesanErrorFB, lc.ReplyTo)
 		}
 		return nil
 	}
