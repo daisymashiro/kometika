@@ -35,45 +35,60 @@ func HandleFacebook(ctx context.Context, client *tg.Client, msg *tg.Message, ent
 func processFacebook(ctx context.Context, client *tg.Client, lc *LoadingContext, url string, logger *zap.Logger) error {
 	logger.Info("Memproses Facebook", zap.String("url", url))
 
-	// Mengambil data menggunakan sistem fallback
 	data, err := facebook.FetchFacebookWithFallback(ctx, logger, url)
 	if err != nil {
 		logger.Warn("Gagal fetch data Facebook", zap.Error(err))
 		log.LogError(ctx, "FacebookFetch", err, "url="+url)
 
-		pesanErrorFB := "  Vidio atau foto mungkin bersifat Privat :<."
+		pesanErrorFB := fmt.Sprintf(
+			"❌ Gagal mengambil video.\n"+
+				"Video/Foto mungkin bersifat privat atau tidak didukung.\n\n"+
+				"📎 URL: %s\n\n"+
+				"ℹ️ Saat ini fitur hanya mendukung Facebook Reels.",
+			url,
+		)
+
+		// Kirim pesan error baru yang permanen (reply ke user)
+		_ = sendGroupText(ctx, client, lc.Peer, pesanErrorFB, lc.ReplyTo)
+
+		// Jika ada pesan loading, edit saja sebagai indikator (tapi akan dihapus oleh WithLoading)
 		if lc.ProgressMsgID != 0 {
-			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, pesanErrorFB, logger)
-		} else {
-			_ = sendGroupText(ctx, client, lc.Peer, pesanErrorFB, lc.ReplyTo)
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal", logger)
 		}
 		return nil
 	}
 
 	title := data.Title
-	if len(title) > 400 {
-		title = title[:400] + "..."
+	if len(title) > 1000 {
+		title = title[:1000] + "..."
 	}
 
 	if data.VidioURL == "" {
+		pesanNoVideo := fmt.Sprintf(
+			"⚠️ Tidak ditemukan URL video.\n\n"+
+				"🔗 URL: %s\n\n"+
+				"ℹ️ Pastikan link tersebut adalah Facebook Reels publik."+
+				"🤬 Gak usah spam juga kon..",
+			url,
+		)
+		_ = sendGroupText(ctx, client, lc.Peer, pesanNoVideo, lc.ReplyTo)
 		if lc.ProgressMsgID != 0 {
-			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Tidak ditemukan URL video.", logger)
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "⚠️ URL video kosong", logger)
 		}
 		return nil
 	}
 
-	// Simpan Audio ke Cache jika tersedia dari scraper
+	// Simpan Audio ke Cache
 	if data.AudioURL != "" && data.ID != "" {
 		cache.SetAudio(data.ID, data.AudioURL, data.Title, "Facebook Music")
 		logger.Info("Audio Facebook berhasil disimpan ke cache", zap.String("video_id", data.ID))
 	}
 
-	// Update pesan loading
+	// Update loading
 	if lc.ProgressMsgID != 0 {
 		_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "📥 Mengunduh video...", logger)
 	}
 
-	// Menyusun tombol inline MP3 jika audio URL valid
 	var replyMarkup tg.ReplyMarkupClass
 	if data.AudioURL != "" && data.ID != "" {
 		replyMarkup = &tg.ReplyInlineMarkup{
@@ -98,13 +113,16 @@ func processFacebook(ctx context.Context, client *tg.Client, lc *LoadingContext,
 		logger.Error("Gagal mengirim video Facebook", zap.Error(err))
 		log.LogError(ctx, "Facebook.SendVideo", err, "url="+url)
 
+		_ = sendGroupText(ctx, client, lc.Peer, "❌ Gagal mengirim video. Coba lagi nanti.", lc.ReplyTo)
+
 		if lc.ProgressMsgID != 0 {
-			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim video.", logger)
+			_ = EditLoadingMessage(ctx, client, lc.Peer, lc.ProgressMsgID, "❌ Gagal mengirim video", logger)
 		}
 		return nil
 	}
 
-	// Siklus pembersihan tombol inline otomatis setelah 2 menit dengan context-aware
+	logger.Info("Video Facebook sukses terkirim", zap.String("video_id", data.ID))
+
 	if replyMarkup != nil && videoMsgUpdates != nil {
 		videoMsgID, err := media.ExtractMessageID(videoMsgUpdates)
 		if err == nil && videoMsgID != 0 {
@@ -114,11 +132,10 @@ func processFacebook(ctx context.Context, client *tg.Client, lc *LoadingContext,
 		}
 	}
 
-	logger.Info("Video Facebook sukses terkirim", zap.String("video_id", data.ID))
 	return nil
 }
 
-// scheduleFacebookAudioButtonCleanup dengan context-aware cleanup
+// scheduleFacebookAudioButtonCleanup tidak berubah
 func scheduleFacebookAudioButtonCleanup(client *tg.Client, peer tg.InputPeerClass, msgID int, videoID string, logger *zap.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

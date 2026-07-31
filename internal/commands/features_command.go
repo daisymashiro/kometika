@@ -65,100 +65,80 @@ func HandleFeaturesCommand(ctx context.Context, client *tg.Client, msg *tg.Messa
 	fm := config.GetFeatureManager()
 
 	var sb strings.Builder
-	sb.WriteString("  <b>Status Fitur Downloader</b>\n\n")
+	sb.WriteString("<b>📋 Status Fitur Downloader</b>\n\n")
 
-	// Urutkan fitur
 	featureList := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
 	for _, feature := range featureList {
-		status := "  Nonaktif"
-
-		// PERBAIKAN: Gunakan fungsi IsEnabled() langsung
+		statusIcon := "❌ Nonaktif"
 		if fm.IsEnabled(feature) {
-			status = "  Aktif"
+			statusIcon = "✅ Aktif"
 		}
-
-		sb.WriteString(fmt.Sprintf("  %s: %s\n", strings.Title(feature), status))
+		// Rata kiri: nama fitur maks 14 karakter, lalu spasi, lalu status
+		sb.WriteString(fmt.Sprintf("<code>%-14s</code> %s\n", strings.Title(feature), statusIcon))
 	}
 
-	sb.WriteString("\nHanya owner yang dapat mengubah status fitur")
+	sb.WriteString("\n🔒 Hanya owner yang dapat mengubah status fitur.")
 
-	// Pastikan bot melakukan Reply ke pesan awal agar topic/pesan spesifik terdeteksi
 	msgSender := message.NewSender(client).To(peer).Reply(msg.ID)
 	_, err = msgSender.StyledText(ctx, htmlparser.String(nil, sb.String()))
 	return err
 }
 
-// HandleListStatusCommand menampilkan status semua fitur (alias untuk /features)
 func HandleListStatusCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, logger *zap.Logger) error {
 	return HandleFeaturesCommand(ctx, client, msg, entities, logger)
 }
 
-// HandleFeatureOnCommand mengaktifkan fitur (hanya owner)
 func HandleFeatureOnCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, args []string, logger *zap.Logger) error {
 	peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
 	if peer == nil {
 		return nil
 	}
-
-	// Buat sender yang me-reply pesan command
 	msgSender := message.NewSender(client).To(peer).Reply(msg.ID)
 
-	// Cek apakah argumen tersedia
 	if len(args) < 1 {
-		_, _ = msgSender.Text(ctx, "  Penggunaan: /on <nama_fitur>\nContoh: /on tiktok (atau /on tt)")
+		_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, "⚠️ <b>Penggunaan:</b> /on &lt;nama_fitur&gt;\nContoh: <code>/on tiktok</code> atau <code>/on tt</code>"))
 		return nil
 	}
 
 	feature := normalizeFeatureName(args[0])
 	fm := config.GetFeatureManager()
 
-	// Validasi nama fitur
 	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
-	isValid := slices.Contains(validFeatures, feature)
-
-	if !isValid {
-		_, _ = msgSender.Text(ctx, fmt.Sprintf("  Fitur '%s' tidak ditemukan.\nFitur yang tersedia: %s", feature, strings.Join(validFeatures, ", ")))
+	if !slices.Contains(validFeatures, feature) {
+		_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("❌ Fitur <b>%s</b> tidak ditemukan.\nFitur yang tersedia: <code>%s</code>", feature, strings.Join(validFeatures, ", "))))
 		return nil
 	}
 
 	fm.Enable(feature)
 	logger.Info("Fitur diaktifkan oleh owner", zap.String("feature", feature))
-	_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("  Fitur %s telah diaktifkan.", strings.Title(feature))))
-
+	_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("✅ Fitur <b>%s</b> telah <u>diaktifkan</u>.", strings.Title(feature))))
 	return nil
 }
 
-// HandleFeatureOffCommand menonaktifkan fitur (hanya owner)
 func HandleFeatureOffCommand(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, args []string, logger *zap.Logger) error {
 	peer, _ := GetPeerFromMessage(ctx, client, msg, entities)
 	if peer == nil {
 		return nil
 	}
-
-	// Buat sender yang me-reply pesan command
 	msgSender := message.NewSender(client).To(peer).Reply(msg.ID)
 
 	if len(args) < 1 {
-		_, _ = msgSender.Text(ctx, "  Penggunaan: /off <nama_fitur>\nContoh: /off tiktok (atau /off tt)")
+		_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, "⚠️ <b>Penggunaan:</b> /off &lt;nama_fitur&gt;\nContoh: <code>/off tiktok</code> atau <code>/off tt</code>"))
 		return nil
 	}
 
 	feature := normalizeFeatureName(args[0])
 	fm := config.GetFeatureManager()
 
-	// Validasi nama fitur
 	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
-	isValid := slices.Contains(validFeatures, feature)
-
-	if !isValid {
-		_, _ = msgSender.Text(ctx, fmt.Sprintf("  Fitur '%s' tidak ditemukan.\nFitur yang tersedia: %s", feature, strings.Join(validFeatures, ", ")))
+	if !slices.Contains(validFeatures, feature) {
+		_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("❌ Fitur <b>%s</b> tidak ditemukan.\nFitur yang tersedia: <code>%s</code>", feature, strings.Join(validFeatures, ", "))))
 		return nil
 	}
 
 	fm.Disable(feature)
 	logger.Info("Fitur dinonaktifkan oleh owner", zap.String("feature", feature))
-	_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("  Fitur %s telah dinonaktifkan.", strings.Title(feature))))
-
+	_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("❌ Fitur <b>%s</b> telah <u>dinonaktifkan</u>.", strings.Title(feature))))
 	return nil
 }
 

@@ -44,17 +44,20 @@ Saya adalah <b>Kometika Bot</b>. Saya siap membantu Anda mengunduh media dari be
 • Instagram
 • Facebook
 • Terabox
+• YouTube (audio)
 
 📌 <b>Cara Penggunaan:</b>
 • <i>Chat Privat:</i> Cukup kirim URL-nya secara langsung.
 • <i>Grup / Forum:</i> Gunakan perintah diikuti URL.
-  Format: <code>.dl [URL]</code>
+  Format: <code>.dl [URL]</code>  (untuk video)
+  Format: <code>.play [URL YouTube]</code>
 
 ⚡ <b>Prefix yang Tersedia:</b>
 <code>.</code> <code>!</code> <code>#</code> <code>/</code>
 
 💡 <b>Contoh:</b>
-<code>.dl https://www.tiktok.com/video/123456</code>`,
+<code>.dl https://www.tiktok.com/video/123456</code>
+<code>.play https://youtu.be/abcdef</code>`,
 		fullName,
 	)
 

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
-	firebase "firebase.google.com/go/v4"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/api/option"
 )
@@ -21,13 +20,20 @@ func InitFirebase() error {
 		return fmt.Errorf("FIREBASE_CRED_JSON belum diset di .env")
 	}
 
-	opt := option.WithCredentialsJSON([]byte(credJSON))
-	app, err := firebase.NewApp(context.Background(), nil, opt)
-	if err != nil {
-		return err
+	projectID := os.Getenv("FIREBASE_PROJECT_ID")
+	if projectID == "" {
+		return fmt.Errorf("FIREBASE_PROJECT_ID belum diset di .env")
 	}
 
-	client, err := app.Firestore(context.Background())
+	dbID := os.Getenv("FIRESTORE_DATABASE_ID")
+	if dbID == "" {
+		dbID = "kometika" // fallback
+	}
+
+	opt := option.WithCredentialsJSON([]byte(credJSON))
+
+	// 🔥 Perbaikan di sini: gunakan NewClientWithDatabase, bukan option.WithDatabaseID
+	client, err := firestore.NewClientWithDatabase(context.Background(), projectID, dbID, opt)
 	if err != nil {
 		return err
 	}
@@ -37,16 +43,13 @@ func InitFirebase() error {
 
 // FirestoreZapHook akan dipanggil oleh Zap setiap kali ada log baru
 func FirestoreZapHook(entry zapcore.Entry) error {
-	// Opsional: Filter hanya level Warn, Error, dan Fatal agar kuota Firestore aman
 	if entry.Level < zapcore.WarnLevel {
 		return nil
 	}
-
 	if firestoreClient == nil {
 		return nil
 	}
 
-	// Gunakan goroutine agar pengiriman log tidak memblokir performa bot utama
 	go func(e zapcore.Entry) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -57,7 +60,6 @@ func FirestoreZapHook(entry zapcore.Entry) error {
 			"logger":  e.LoggerName,
 			"message": e.Message,
 			"caller":  e.Caller.String(),
-			// "stack": e.Stack, // Buka komen ini jika ingin melihat stack trace
 		})
 		if err != nil {
 			fmt.Printf("Gagal mengirim log ke Firebase: %v\n", err)
@@ -66,3 +68,4 @@ func FirestoreZapHook(entry zapcore.Entry) error {
 
 	return nil
 }
+

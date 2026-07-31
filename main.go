@@ -52,11 +52,11 @@ func initLogger() {
 
 	encoder := zapcore.NewJSONEncoder(encoderCfg)
 	core := zapcore.NewCore(encoder, writeSyncer, zapcore.DebugLevel)
-	if err := log.InitFirebase(); err == nil {
-		core = zapcore.RegisterHooks(core, log.FirestoreZapHook)
-	} else {
-		fmt.Printf("Peringatan: Firebase tidak aktif, log hanya ke file lokal. Error: %v\n", err)
-	}
+	//if err := log.InitFirebase(); err == nil {
+	//	core = zapcore.RegisterHooks(core, log.FirestoreZapHook)
+	//} else {
+	//	fmt.Printf("Peringatan: Firebase tidak aktif, log hanya ke file lokal. Error: %v\n", err)
+	//}
 	logger = zap.New(core)
 	zap.ReplaceGlobals(logger)
 }
@@ -260,7 +260,7 @@ func handleCommand(ctx context.Context, tgClient *tg.Client, msg *tg.Message, en
 	found := false
 
 	// Parse command dengan support multiple prefix
-	for _, prefix := range []string{"/", ".", "!", "#"} {
+	for _, prefix := range []string{"/", ".", "!"} {
 		if rest, ok := strings.CutPrefix(text, prefix); ok {
 			parts := strings.Fields(rest)
 			if len(parts) > 0 {
