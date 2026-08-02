@@ -114,4 +114,3 @@ func ResultToUniversal(r Result) TeraboxUniversalData {
 func ResetCircuitBreaker(apiName string) {
 	teraboxBreaker.Reset(apiName)
 }
-

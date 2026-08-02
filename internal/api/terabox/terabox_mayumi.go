@@ -7,14 +7,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"go.uber.org/zap"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // ========== KONSTANTA PRIVATE ==========
@@ -24,7 +27,19 @@ const (
 	teraboxDEVUID     = "TBIMXV2-O_E58C50CDB6B04EF889B1B7B0FE0A57CB-C_0-D_99IEPI7RT-M_0068EB688271-V_8C6A2F6D"
 	teraboxUSER_AGENT = "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox"
 	proxyAPI          = "https://tera-proxy.givace1540.workers.dev/generate"
+
+	// maxTeraboxWorkers membatasi konkurensi ke API Terabox & proxy stream.
+	// ponytail: jadikan configurable via env kalau akun mulai kena rate-limit.
+	maxTeraboxWorkers = 5
 )
+
+// teraboxNDUSValue memakai cookie ndus dari env kalau ada (mis. akun verified).
+func teraboxNDUSValue() string {
+	if v := os.Getenv("TERABOX_NDUS"); v != "" {
+		return v
+	}
+	return teraboxNDUS
+}
 
 // ========== PRIVATE STRUCTURES ==========
 type teraboxProxyResponse struct {
@@ -32,6 +47,10 @@ type teraboxProxyResponse struct {
 	StreamURL string `json:"stream_url"`
 	ExpiresIn string `json:"expires_in"`
 	ID        string `json:"id"`
+	Errno     int    `json:"errno"`
+	Errmsg    string `json:"errmsg"`
+	Message   string `json:"message"`
+	Error     string `json:"error"`
 }
 
 type teraboxThumbnails struct {
@@ -49,7 +68,6 @@ type teraboxFileData struct {
 	IsAdult        int               `json:"is_adult"`
 	Dlink          string            `json:"dlink"`
 	Thumbs         teraboxThumbnails `json:"thumbs"`
-	LocatedDlinks  []string          `json:"located_dlinks"`
 	FullPath       string            `json:"full_path"`
 }
 
@@ -63,7 +81,7 @@ func teraboxSha1Hash(text string) string {
 func teraboxGenerateRand() (string, string) {
 	salt := "Ng2sz6ktQahkvEkcKIhfak4WrM3r9a86"
 	t := strconv.FormatInt(time.Now().Unix(), 10)
-	ndusHash := teraboxSha1Hash(teraboxNDUS)
+	ndusHash := teraboxSha1Hash(teraboxNDUSValue())
 	payload := ndusHash + teraboxUSERID + salt + t + teraboxDEVUID
 	randHash := teraboxSha1Hash(payload)
 	return randHash, t
@@ -128,7 +146,19 @@ func teraboxFormatFileSize(bytes int64) string {
 	return fmt.Sprintf("%.2f %s", float64(bytes)/float64(div), []string{"KB", "MB", "GB", "TB"}[exp])
 }
 
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
+}
+
 func teraboxGenerateStreamURL(dlinkURL string) (string, error) {
+	// Body POST ke proxy stream: {"url": "<direct link terabox>"}.
+	// Proxy yang mengubahnya jadi URL streamable untuk diputar langsung.
 	payload := map[string]string{
 		"url": dlinkURL,
 	}
@@ -156,13 +186,27 @@ func teraboxGenerateStreamURL(dlinkURL string) (string, error) {
 		return "", err
 	}
 
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("proxy API HTTP %d: %s", res.StatusCode, firstLine(string(body)))
+	}
+
 	var proxyRes teraboxProxyResponse
 	if err := json.Unmarshal(body, &proxyRes); err != nil {
-		return "", err
+		return "", fmt.Errorf("parse proxy response: %w, body: %s", err, firstLine(string(body)))
 	}
 
 	if !proxyRes.Success {
-		return "", fmt.Errorf("proxy API returned success=false")
+		detail := proxyRes.Errmsg
+		if detail == "" {
+			detail = proxyRes.Message
+		}
+		if detail == "" {
+			detail = proxyRes.Error
+		}
+		if proxyRes.Errno != 0 {
+			return "", fmt.Errorf("proxy API gagal: errno=%d errmsg=%s", proxyRes.Errno, detail)
+		}
+		return "", fmt.Errorf("proxy API returned success=false: %s", detail)
 	}
 
 	return proxyRes.StreamURL, nil
@@ -191,7 +235,7 @@ func teraboxGetInfoRaw(client *http.Client, surl string, path string) (string, e
 	reqURL.RawQuery = q.Encode()
 	req, _ := http.NewRequest("POST", reqURL.String(), nil)
 	req.Header.Set("User-Agent", teraboxUSER_AGENT)
-	req.AddCookie(&http.Cookie{Name: "ndus", Value: teraboxNDUS})
+	req.AddCookie(&http.Cookie{Name: "ndus", Value: teraboxNDUSValue()})
 	res, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -227,7 +271,7 @@ func teraboxGetLocatedDownloads(client *http.Client, dlink string) ([]string, er
 	reqURL.RawQuery = q.Encode()
 	req, _ := http.NewRequest("POST", reqURL.String(), nil)
 	req.Header.Set("User-Agent", teraboxUSER_AGENT)
-	req.AddCookie(&http.Cookie{Name: "ndus", Value: teraboxNDUS})
+	req.AddCookie(&http.Cookie{Name: "ndus", Value: teraboxNDUSValue()})
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -264,95 +308,262 @@ func teraboxGetLocatedDownloads(client *http.Client, dlink string) ([]string, er
 	return urls, nil
 }
 
-func teraboxCollectFiles(client *http.Client, surl, currentPath string, files *[]teraboxFileData) {
-	raw, err := teraboxGetInfoRaw(client, surl, currentPath)
+// teraboxListRaw ambil daftar item (file + folder) dari satu folder share.
+func teraboxListRaw(client *http.Client, surl, path string) ([]map[string]interface{}, error) {
+	raw, err := teraboxGetInfoRaw(client, surl, path)
 	if err != nil {
-		logError("Error fetching terabox info",
-			zap.String("path", currentPath),
-			zap.Error(err))
-		return
+		return nil, err
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
-		logError("Error parsing terabox JSON",
-			zap.String("path", currentPath),
-			zap.Error(err))
-		return
+		return nil, fmt.Errorf("parse terabox JSON: %w", err)
+	}
+	if errno, ok := result["errno"].(float64); ok && errno != 0 {
+		msg, _ := result["errmsg"].(string)
+		return nil, fmt.Errorf("terabox API error: errno=%d errmsg=%s", int(errno), msg)
 	}
 	list, ok := result["list"].([]interface{})
 	if !ok {
-		return
+		return nil, nil
 	}
+	items := make([]map[string]interface{}, 0, len(list))
 	for _, itemRaw := range list {
-		item := itemRaw.(map[string]interface{})
-		isDir := false
-		if v, ok := item["isdir"].(string); ok && v == "1" {
-			isDir = true
-		} else if v, ok := item["isdir"].(float64); ok && v == 1 {
-			isDir = true
-		}
-		if !isDir {
-			serverFilename, _ := item["server_filename"].(string)
-			md5, _ := item["md5"].(string)
-			emd5, _ := item["emd5"].(string)
-			size, _ := item["size"].(float64)
-			isAdult, _ := item["is_adult"].(float64)
-			dlink, _ := item["dlink"].(string)
-
-			thumbs := teraboxThumbnails{}
-			if thumbsRaw, ok := item["thumbs"].(map[string]interface{}); ok {
-				if u1, ok := thumbsRaw["url1"].(string); ok {
-					thumbs.URL1 = u1
-				}
-				if u2, ok := thumbsRaw["url2"].(string); ok {
-					thumbs.URL2 = u2
-				}
-				if u3, ok := thumbsRaw["url3"].(string); ok {
-					thumbs.URL3 = u3
-				}
-				if icon, ok := thumbsRaw["icon"].(string); ok {
-					thumbs.Icon = icon
-				}
-			}
-
-			locatedDlinks := []string{}
-			if dlink != "" {
-				links, err := teraboxGetLocatedDownloads(client, dlink)
-				if err != nil {
-					logWarn("Failed to get located downloads",
-						zap.String("filename", serverFilename),
-						zap.Error(err))
-				} else {
-					locatedDlinks = links
-				}
-			}
-
-			fullPath := currentPath
-			if apiPath, ok := item["path"].(string); ok && apiPath != "" {
-				fullPath = apiPath
-			} else if fullPath == "" {
-				fullPath = "/" + serverFilename
-			} else {
-				fullPath = fullPath + "/" + serverFilename
-			}
-
-			*files = append(*files, teraboxFileData{
-				ServerFilename: serverFilename,
-				MD5:            md5,
-				EMD5:           emd5,
-				Size:           int64(size),
-				IsAdult:        int(isAdult),
-				Dlink:          dlink,
-				Thumbs:         thumbs,
-				LocatedDlinks:  locatedDlinks,
-				FullPath:       fullPath,
-			})
-		} else {
-			if subPath, ok := item["path"].(string); ok {
-				teraboxCollectFiles(client, surl, subPath, files)
-			}
+		if item, ok := itemRaw.(map[string]interface{}); ok {
+			items = append(items, item)
 		}
 	}
+	return items, nil
+}
+
+func teraboxIsDir(item map[string]interface{}) bool {
+	switch v := item["isdir"].(type) {
+	case string:
+		return v == "1"
+	case float64:
+		return v == 1
+	}
+	return false
+}
+
+func teraboxItemToFileData(item map[string]interface{}, currentPath string) teraboxFileData {
+	serverFilename, _ := item["server_filename"].(string)
+	md5, _ := item["md5"].(string)
+	emd5, _ := item["emd5"].(string)
+	size, _ := item["size"].(float64)
+	isAdult, _ := item["is_adult"].(float64)
+	dlink, _ := item["dlink"].(string)
+
+	thumbs := teraboxThumbnails{}
+	if thumbsRaw, ok := item["thumbs"].(map[string]interface{}); ok {
+		if u1, ok := thumbsRaw["url1"].(string); ok {
+			thumbs.URL1 = u1
+		}
+		if u2, ok := thumbsRaw["url2"].(string); ok {
+			thumbs.URL2 = u2
+		}
+		if u3, ok := thumbsRaw["url3"].(string); ok {
+			thumbs.URL3 = u3
+		}
+		if icon, ok := thumbsRaw["icon"].(string); ok {
+			thumbs.Icon = icon
+		}
+	}
+
+	fullPath := currentPath
+	if apiPath, ok := item["path"].(string); ok && apiPath != "" {
+		fullPath = apiPath
+	} else if fullPath == "" {
+		fullPath = "/" + serverFilename
+	} else {
+		fullPath = fullPath + "/" + serverFilename
+	}
+
+	return teraboxFileData{
+		ServerFilename: serverFilename,
+		MD5:            md5,
+		EMD5:           emd5,
+		Size:           int64(size),
+		IsAdult:        int(isAdult),
+		Dlink:          dlink,
+		Thumbs:         thumbs,
+		FullPath:       fullPath,
+	}
+}
+
+// teraboxCollectFiles kumpulkan semua file dari share dengan listing folder paralel.
+// Jumlah worker mengikuti jumlah folder level-1 (dibatasi maxTeraboxWorkers).
+func teraboxCollectFiles(client *http.Client, surl string) []teraboxFileData {
+	rootItems, err := teraboxListRaw(client, surl, "")
+	if err != nil {
+		logError("Error fetching terabox root", zap.String("path", ""), zap.Error(err))
+		return nil
+	}
+
+	var files []teraboxFileData
+	var rootFolders []string
+	for _, item := range rootItems {
+		if teraboxIsDir(item) {
+			if sub, ok := item["path"].(string); ok && sub != "" {
+				rootFolders = append(rootFolders, sub)
+			}
+		} else {
+			files = append(files, teraboxItemToFileData(item, ""))
+		}
+	}
+
+	if len(rootFolders) == 0 {
+		return files
+	}
+
+	workers := len(rootFolders)
+	if workers > maxTeraboxWorkers {
+		workers = maxTeraboxWorkers
+	}
+
+	type folderTask struct{ path string }
+	tasks := make(chan folderTask, maxTeraboxWorkers*4)
+
+	var mu sync.Mutex
+	var pending int
+	// schedule non-blocking: overflow dilempar ke goroutine supaya worker
+	// tidak pernah saling blokir send dan mati deadlock.
+	schedule := func(p string) {
+		mu.Lock()
+		pending++
+		mu.Unlock()
+		select {
+		case tasks <- folderTask{path: p}:
+		default:
+			go func() { tasks <- folderTask{path: p} }()
+		}
+	}
+	finish := func() {
+		mu.Lock()
+		pending--
+		done := pending == 0
+		mu.Unlock()
+		if done {
+			close(tasks)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range tasks {
+				items, err := teraboxListRaw(client, surl, t.path)
+				if err != nil {
+					logError("Error fetching terabox folder",
+						zap.String("path", t.path),
+						zap.Error(err))
+					finish()
+					continue
+				}
+				for _, item := range items {
+					if teraboxIsDir(item) {
+						if sub, ok := item["path"].(string); ok && sub != "" {
+							schedule(sub)
+						}
+					} else {
+						mu.Lock()
+						files = append(files, teraboxItemToFileData(item, t.path))
+						mu.Unlock()
+					}
+				}
+				finish()
+			}
+		}()
+	}
+
+	for _, p := range rootFolders {
+		schedule(p)
+	}
+	wg.Wait()
+	return files
+}
+
+// teraboxEnrichFiles lengkapi tiap file: stream URL (via proxy) + download URL, paralel.
+// Kandidat stream: located dlink (direct, tanpa verifikasi akun) dulu, baru dlink raw.
+func teraboxEnrichFiles(client *http.Client, teraboxURL string, files []teraboxFileData) []TeraboxUniversalData {
+	id, err := teraboxGenerateID(teraboxURL)
+	if err != nil {
+		logWarn("Gagal generate ID", zap.Error(err))
+		id = "unknown"
+	}
+
+	results := make([]TeraboxUniversalData, len(files))
+	if len(files) == 0 {
+		return results
+	}
+
+	workers := len(files)
+	if workers > maxTeraboxWorkers {
+		workers = maxTeraboxWorkers
+	}
+
+	idxCh := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range idxCh {
+				file := files[idx]
+
+				// Kandidat URL untuk stream, maksimal 2: located dlink lalu dlink raw.
+				var candidates []string
+				if file.Dlink != "" {
+					if links, err := teraboxGetLocatedDownloads(client, file.Dlink); err == nil && len(links) > 0 {
+						candidates = append(candidates, links[0])
+					}
+					candidates = append(candidates, file.Dlink)
+				}
+
+				streamURL := ""
+				var lastStreamErr error
+				for _, cand := range candidates {
+					s, err := teraboxGenerateStreamURL(cand)
+					if err == nil && s != "" {
+						streamURL = s
+						break
+					}
+					lastStreamErr = err
+					logWarn("Gagal generate stream URL",
+						zap.String("filename", file.ServerFilename),
+						zap.String("candidate", cand),
+						zap.Error(err))
+				}
+				if streamURL == "" && lastStreamErr != nil {
+					logWarn("Semua kandidat stream gagal",
+						zap.String("filename", file.ServerFilename),
+						zap.Error(lastStreamErr))
+				}
+
+				downloadURL := file.Dlink
+				if downloadURL == "" && len(candidates) > 0 {
+					downloadURL = candidates[0]
+				}
+
+				results[idx] = TeraboxUniversalData{
+					ID:          id,
+					FileName:    file.ServerFilename,
+					FileSize:    teraboxFormatFileSize(file.Size),
+					Thumbnail:   file.Thumbs.URL3,
+					StreamURL:   streamURL,
+					DownloadURL: downloadURL,
+				}
+			}
+		}()
+	}
+
+	for i := range files {
+		idxCh <- i
+	}
+	close(idxCh)
+	wg.Wait()
+	return results
 }
 
 // ========== PUBLIC FUNCTION ==========
@@ -363,57 +574,14 @@ func FetchTeraboxDirectUniversal(teraboxURL string) ([]TeraboxUniversalData, err
 
 	logInfo("Mengekstrak files dari terabox", zap.String("url", teraboxURL))
 
-	var files []teraboxFileData
-	teraboxCollectFiles(client, teraboxURL, "", &files)
-
+	files := teraboxCollectFiles(client, teraboxURL)
 	if len(files) == 0 {
 		return nil, fmt.Errorf("tidak ada file ditemukan")
 	}
 
 	logInfo("Files berhasil dikumpulkan", zap.Int("total", len(files)))
 
-	var universalData []TeraboxUniversalData
-	for i, file := range files {
-		logInfo("Memproses file",
-			zap.Int("index", i+1),
-			zap.Int("total", len(files)),
-			zap.String("filename", file.ServerFilename))
-
-		id, err := teraboxGenerateID(teraboxURL)
-		if err != nil {
-			logWarn("Gagal generate ID", zap.Error(err))
-			id = "unknown"
-		}
-
-		fileSize := teraboxFormatFileSize(file.Size)
-		thumbnail := file.Thumbs.URL3
-		streamURL := ""
-		downloadURL := file.Dlink
-
-		if file.Dlink != "" {
-			streamURL, err = teraboxGenerateStreamURL(file.Dlink)
-			if err != nil {
-				logWarn("Gagal generate stream URL",
-					zap.String("filename", file.ServerFilename),
-					zap.Error(err))
-				streamURL = ""
-			}
-		}
-
-		if downloadURL == "" && len(file.LocatedDlinks) > 0 {
-			downloadURL = file.LocatedDlinks[0]
-		}
-
-		universalData = append(universalData, TeraboxUniversalData{
-			ID:          id,
-			FileName:    file.ServerFilename,
-			FileSize:    fileSize,
-			Thumbnail:   thumbnail,
-			StreamURL:   streamURL,
-			DownloadURL: downloadURL,
-		})
-	}
-
-	logInfo("Konversi ke universal format selesai", zap.Int("total", len(universalData)))
-	return universalData, nil
+	result := teraboxEnrichFiles(client, teraboxURL, files)
+	logInfo("Konversi ke universal format selesai", zap.Int("total", len(result)))
+	return result, nil
 }

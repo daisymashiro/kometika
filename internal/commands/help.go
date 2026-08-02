@@ -51,7 +51,7 @@ Bot ini mendukung multiple prefix. Anda bisa menggunakan salah satu dari simbol 
 	// Membuat tombol inline menggunakan package markup
 	replyMarkup := markup.InlineKeyboard(
 		markup.Row(
-			markup.URL("💬 Hubungi Admin", adminURL),
+			markup.URL("💬 Hubungi Admin", adminURL, markup.StyleBgPrimary()),
 		),
 	)
 

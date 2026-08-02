@@ -14,6 +14,7 @@ import (
 	"mybot/internal/config"
 	"mybot/internal/media"
 
+	"github.com/gotd/td/telegram/message/markup"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 	"go.uber.org/zap"
@@ -26,6 +27,7 @@ type teraboxSession struct {
 	Files       []terabox.TeraboxUniversalData
 	MenuMsgID   int
 	ActionMsgID int
+	Page        int
 	Peer        tg.InputPeerClass
 }
 
@@ -42,12 +44,27 @@ func generateShortID() string {
 	return fmt.Sprintf("%x", b)
 }
 
-func truncateFileName(name string) string {
+// formatFileNameButton memendekkan nama file untuk tombol inline keyboard.
+// Kepala + ekor nama asli dipertahankan, dan ekstensi (format) selalu terlihat.
+func formatFileNameButton(name string) string {
+	const maxRunes = 40
 	runes := []rune(name)
-	if len(runes) > 40 {
-		return string(runes[:37]) + "..."
+	if len(runes) <= maxRunes {
+		return name
 	}
-	return name
+
+	ext := getExt(name)
+	base := name
+	if ext != "" {
+		base = base[:len(base)-len(ext)]
+	}
+
+	baseRunes := []rune(base)
+	head, tail := 24, 8
+	if len(baseRunes) <= head+tail {
+		return base + ext
+	}
+	return string(baseRunes[:head]) + "…" + string(baseRunes[len(baseRunes)-tail:]) + ext
 }
 
 // getExt mengembalikan ekstensi file (termasuk titik) atau string kosong.
@@ -188,6 +205,7 @@ func fetchAndShowTerabox(ctx context.Context, client *tg.Client, peer tg.InputPe
 		Files:       files,
 		MenuMsgID:   menuMsgID,
 		ActionMsgID: 0,
+		Page:        0,
 		Peer:        peer,
 	}
 	tbMutex.Unlock()
@@ -219,31 +237,22 @@ func buildTeraboxFileMarkup(files []terabox.TeraboxUniversalData, reqID string, 
 	end := min(start+8, len(files))
 
 	for i := start; i < end; i++ {
-		btnText := fmt.Sprintf("📁 %s", truncateFileName(files[i].FileName))
+		btnText := fmt.Sprintf("📁 %s", formatFileNameButton(files[i].FileName))
 		cbData := fmt.Sprintf("tb_dl_%s_%d", reqID, i)
 		rows = append(rows, tg.KeyboardButtonRow{
 			Buttons: []tg.KeyboardButtonClass{
-				&tg.KeyboardButtonCallback{Text: btnText, Data: []byte(cbData)},
+				markup.Callback(btnText, []byte(cbData), markup.StyleBgSuccess()),
 			},
 		})
 	}
 
 	var navButtons []tg.KeyboardButtonClass
 	if page > 0 {
-		navButtons = append(navButtons, &tg.KeyboardButtonCallback{
-			Text: "⬅️ Prev",
-			Data: fmt.Appendf(nil, "tb_page_%s_%d", reqID, page-1),
-		})
+		navButtons = append(navButtons, markup.Callback("⬅️ Prev", fmt.Appendf(nil, "tb_page_%s_%d", reqID, page-1), markup.StyleBgSuccess()))
 	}
-	navButtons = append(navButtons, &tg.KeyboardButtonCallback{
-		Text: "❌ Tutup",
-		Data: fmt.Appendf(nil, "tb_close_%s", reqID),
-	})
+	navButtons = append(navButtons, markup.Callback("❌ Tutup", fmt.Appendf(nil, "tb_close_%s", reqID), markup.StyleBgSuccess()))
 	if end < len(files) {
-		navButtons = append(navButtons, &tg.KeyboardButtonCallback{
-			Text: "Next ➡️",
-			Data: fmt.Appendf(nil, "tb_page_%s_%d", reqID, page+1),
-		})
+		navButtons = append(navButtons, markup.Callback("Next ➡️", fmt.Appendf(nil, "tb_page_%s_%d", reqID, page+1), markup.StyleBgSuccess()))
 	}
 	rows = append(rows, tg.KeyboardButtonRow{Buttons: navButtons})
 
@@ -258,25 +267,34 @@ func sendTeraboxMenu(ctx context.Context, client *tg.Client, peer tg.InputPeerCl
 	if !exists {
 		return media.EditHTML(ctx, client, peer, msgID, "❌ Sesi Terabox telah kadaluarsa. Silakan kirim ulang link.")
 	}
-	markup := buildTeraboxFileMarkup(sess.Files, reqID, page)
+	fm := buildTeraboxFileMarkup(sess.Files, reqID, page)
 	plainText := fmt.Sprintf("🗂 Data Terabox Ditemukan!\nTotal File: %d\nHalaman: %d\n\nPilih file untuk diunduh:", len(sess.Files), page+1)
-	return media.EditWithMarkup(ctx, client, peer, msgID, plainText, markup)
+	if err := media.EditWithMarkup(ctx, client, peer, msgID, plainText, fm); err != nil {
+		return err
+	}
+	tbMutex.Lock()
+	if s, ok := teraboxCache[reqID]; ok {
+		s.Page = page
+		teraboxCache[reqID] = s
+	}
+	tbMutex.Unlock()
+	return nil
 }
 
-func sendNewTeraboxMenu(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, reqID string, replyTo *tg.InputReplyToMessage) (int, error) {
+func sendNewTeraboxMenu(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, reqID string, page int, replyTo *tg.InputReplyToMessage) (int, error) {
 	tbMutex.RLock()
 	sess, exists := teraboxCache[reqID]
 	tbMutex.RUnlock()
 	if !exists {
 		return 0, fmt.Errorf("sesi tidak ditemukan")
 	}
-	markup := buildTeraboxFileMarkup(sess.Files, reqID, 0)
-	plainText := fmt.Sprintf("🗂 Data Terabox Ditemukan!\nTotal File: %d\n\nPilih file untuk diunduh:", len(sess.Files))
+	fm := buildTeraboxFileMarkup(sess.Files, reqID, page)
+	plainText := fmt.Sprintf("🗂 Data Terabox Ditemukan!\nTotal File: %d\nHalaman: %d\n\nPilih file untuk diunduh:", len(sess.Files), page+1)
 	reqSend := &tg.MessagesSendMessageRequest{
 		Peer:        peer,
 		Message:     plainText,
 		RandomID:    time.Now().UnixNano(),
-		ReplyMarkup: markup,
+		ReplyMarkup: fm,
 	}
 	if replyTo != nil {
 		reqSend.SetReplyTo(replyTo)
@@ -293,20 +311,11 @@ func sendNewTeraboxMenu(ctx context.Context, client *tg.Client, peer tg.InputPee
 func buildActionMarkup(reqID string, index int, hasStream bool) *tg.ReplyInlineMarkup {
 	var buttons []tg.KeyboardButtonClass
 	if hasStream {
-		buttons = append(buttons, &tg.KeyboardButtonCallback{
-			Text: "▶️ Stream",
-			Data: fmt.Appendf(nil, "tb_stream_%s_%d", reqID, index),
-		})
+		buttons = append(buttons, markup.Callback("▶️ Stream", fmt.Appendf(nil, "tb_stream_%s_%d", reqID, index), markup.StyleBgSuccess()))
 	}
 	buttons = append(buttons,
-		&tg.KeyboardButtonCallback{
-			Text: "⬇️ Download",
-			Data: fmt.Appendf(nil, "tb_down_%s_%d", reqID, index),
-		},
-		&tg.KeyboardButtonCallback{
-			Text: "🔙 Kembali",
-			Data: fmt.Appendf(nil, "tb_back_%s", reqID), // kembali ke menu file halaman 0
-		},
+		markup.Callback("⬇️ Download", fmt.Appendf(nil, "tb_down_%s_%d", reqID, index), markup.StyleBgSuccess()),
+		markup.Callback("🔙 Kembali", fmt.Appendf(nil, "tb_back_%s", reqID), markup.StyleBgDanger()),
 	)
 	return &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{{Buttons: buttons}}}
 }
@@ -367,7 +376,7 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 		if sess.ActionMsgID != 0 {
 			deleteGroupMessage(ctx, client, peer, sess.ActionMsgID)
 		}
-		newMenuID, err := sendNewTeraboxMenu(ctx, client, peer, reqID, nil)
+		newMenuID, err := sendNewTeraboxMenu(ctx, client, peer, reqID, sess.Page, nil)
 		if err != nil {
 			media.AnswerCallback(ctx, client, update.QueryID, "Gagal memuat menu", true)
 			return nil
@@ -377,6 +386,7 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 		if s, ok := teraboxCache[reqID]; ok {
 			s.MenuMsgID = newMenuID
 			s.ActionMsgID = 0
+			s.Page = sess.Page
 			teraboxCache[reqID] = s
 		}
 		tbMutex.Unlock()
@@ -503,9 +513,17 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 		if err != nil {
 			shortURL = fileTarget.StreamURL
 		}
-		htmlMsg := fmt.Sprintf("▶️ <b>%s</b>\n\n<a href=\"%s\">🔗 Buka Stream</a>\n\n@Kometika_bot",
-			fileTarget.FileName, shortURL)
-		_ = media.SendHTML(ctx, client, peer, htmlMsg)
+		htmlMsg := fmt.Sprintf("▶️ %s\n\n@Kometika_bot", fileTarget.FileName)
+		streamMarkup := markup.InlineKeyboard(markup.Row(markup.URL("🔗 Buka Stream", shortURL, markup.StyleBgSuccess())))
+		reqSend := &tg.MessagesSendMessageRequest{
+			Peer:        peer,
+			Message:     htmlMsg,
+			RandomID:    time.Now().UnixNano(),
+			ReplyMarkup: streamMarkup,
+		}
+		if _, err := client.MessagesSendMessage(ctx, reqSend); err != nil {
+			logger.Warn("Gagal kirim tombol stream", zap.Error(err))
+		}
 		return nil
 	}
 
@@ -519,7 +537,7 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 		}
 
 		sizeBytes := parseFileSizeToBytes(fileTarget.FileSize)
-		const maxSize = 200 * 1024 * 1024 // 200 MB
+		const maxSize = 400 * 1024 * 1024 // 400 MB
 
 		if sizeBytes < maxSize {
 			// Ambil stream
@@ -581,14 +599,22 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 				logger.Info("Upload sukses", zap.String("filename", fileTarget.FileName))
 			}
 		} else {
-			// File besar: kirim link download
+			// File > 400 MB: kirim D-URL pendek sebagai tombol
 			shortURL, err := api.ShortenWithFallback(downloadURL)
 			if err != nil {
 				shortURL = downloadURL
 			}
-			htmlMsg := fmt.Sprintf("⬇️ <b>%s</b>\n\n<a href=\"%s\">🔗 Unduh File</a>\n\n@Kometika_bot",
-				fileTarget.FileName, shortURL)
-			_ = media.SendHTML(ctx, client, peer, htmlMsg)
+			htmlMsg := fmt.Sprintf("⬇️ %s\n\n📦 Ukuran: %s\n\n@Kometika_bot", fileTarget.FileName, fileTarget.FileSize)
+			downMarkup := markup.InlineKeyboard(markup.Row(markup.URL("🔗 Unduh File", shortURL, markup.StyleBgSuccess())))
+			reqSend := &tg.MessagesSendMessageRequest{
+				Peer:        peer,
+				Message:     htmlMsg,
+				RandomID:    time.Now().UnixNano(),
+				ReplyMarkup: downMarkup,
+			}
+			if _, err := client.MessagesSendMessage(ctx, reqSend); err != nil {
+				logger.Warn("Gagal kirim tombol unduh", zap.Error(err))
+			}
 		}
 		return nil
 	}
