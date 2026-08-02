@@ -44,6 +44,7 @@ Saya adalah <b>Kometika Bot</b>. Saya siap membantu Anda mengunduh media dari be
 • Instagram
 • Facebook
 • Terabox
+• MediaFire
 • YouTube (audio)
 
 📌 <b>Cara Penggunaan:</b>
@@ -53,10 +54,10 @@ Saya adalah <b>Kometika Bot</b>. Saya siap membantu Anda mengunduh media dari be
   Format: <code>.play [URL YouTube]</code>
 
 ⚡ <b>Prefix yang Tersedia:</b>
-<code>.</code> <code>!</code> <code>#</code> <code>/</code>
+<code>.</code> <code>!</code> <code>/</code>
 
 💡 <b>Contoh:</b>
-<code>.dl https://www.tiktok.com/video/123456</code>
+<code>.dl https://vm.tiktok.com/lengserkanprabowo 
 <code>.play https://youtu.be/abcdef</code>`,
 		fullName,
 	)

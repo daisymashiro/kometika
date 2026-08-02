@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gotd/td/telegram/message"
+	"github.com/gotd/td/telegram/message/markup"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"go.uber.org/zap"
@@ -40,17 +41,19 @@ Pilih mode operasi bot di bawah ini:`,
 }
 
 // buildBotModeMarkup membuat tombol inline 🤖 Auto dan 🔧 Manual
-func buildBotModeMarkup() *tg.ReplyInlineMarkup {
-	return &tg.ReplyInlineMarkup{
-		Rows: []tg.KeyboardButtonRow{
-			{
-				Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonCallback{Text: "🤖 Auto", Data: []byte("botmode_auto")},
-					&tg.KeyboardButtonCallback{Text: "🔧 Manual", Data: []byte("botmode_manual")},
-				},
-			},
-		},
-	}
+func buildBotModeMarkup() tg.ReplyMarkupClass {
+	return markup.InlineKeyboard(
+		markup.Row(
+			markup.Callback("Auto", []byte("botmode_auto"),
+				markup.StyleBgSuccess(),               // Warna Hijau
+				markup.StyleIcon(5897551101741244239), // ID Custom Emoji
+			),
+			markup.Callback("Manual", []byte("botmode_manual"),
+				markup.StyleBgDanger(),                // Warna Merah
+				markup.StyleIcon(5897688742558179551), // ID Custom Emoji
+			),
+		),
+	)
 }
 
 // HandleBotModeCommand menangani command utama (.botmode)

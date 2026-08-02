@@ -49,14 +49,9 @@ func initLogger() {
 	encoderCfg := zap.NewProductionEncoderConfig()
 	encoderCfg.TimeKey = "time"
 	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
-
 	encoder := zapcore.NewJSONEncoder(encoderCfg)
+
 	core := zapcore.NewCore(encoder, writeSyncer, zapcore.DebugLevel)
-	//if err := log.InitFirebase(); err == nil {
-	//	core = zapcore.RegisterHooks(core, log.FirestoreZapHook)
-	//} else {
-	//	fmt.Printf("Peringatan: Firebase tidak aktif, log hanya ke file lokal. Error: %v\n", err)
-	//}
 	logger = zap.New(core)
 	zap.ReplaceGlobals(logger)
 }
@@ -264,7 +259,21 @@ func handleCommand(ctx context.Context, tgClient *tg.Client, msg *tg.Message, en
 		if rest, ok := strings.CutPrefix(text, prefix); ok {
 			parts := strings.Fields(rest)
 			if len(parts) > 0 {
-				cmd = strings.ToLower(parts[0])
+				rawCmd := strings.ToLower(parts[0])
+
+				// Pisahkan command dari username bot berdasarkan tanda '@'
+				cmdParts := strings.SplitN(rawCmd, "@", 2)
+				cmd = cmdParts[0] // Ambil command murninya saja (misal: "start" atau "status")
+
+				if len(cmdParts) > 1 {
+					targetUsername := cmdParts[1]
+					expectedUsername := strings.ToLower(strings.TrimPrefix(botUsername, "@"))
+
+					if targetUsername != expectedUsername {
+						return nil
+					}
+				}
+
 				args = parts[1:]
 				found = true
 				break
@@ -282,7 +291,7 @@ func handleCommand(ctx context.Context, tgClient *tg.Client, msg *tg.Message, en
 	router := commands.NewCommandRouter(tgClient, rootID, botUsername, logger)
 
 	// Untuk command yang perlu async execution
-	needsAsync := []string{"dl", "gdn", "vnstat", "speedtest", "start", "features", "liststatus", "on", "off"}
+	needsAsync := []string{"dl", "gdn", "vnstat", "speedtest", "start", "features", "liststatus", "on", "off", "help"}
 	for _, asyncCmd := range needsAsync {
 		if cmd == asyncCmd {
 			enqueueJob(func() {

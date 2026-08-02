@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gotd/td/telegram/message/markup"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -423,19 +424,13 @@ func buildInstagramAudioButton(audioURL string, videoID string) tg.ReplyMarkupCl
 	if audioURL == "" || videoID == "" {
 		return nil
 	}
-
-	return &tg.ReplyInlineMarkup{
-		Rows: []tg.KeyboardButtonRow{
-			{
-				Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonCallback{
-						Text: "🎵 Unduh Audio (MP3)",
-						Data: []byte(fmt.Sprintf("mp3_%s", videoID)),
-					},
-				},
-			},
-		},
-	}
+	return markup.InlineKeyboard(
+		markup.Row(
+			markup.Callback("🎵 Unduh Audio (MP3)", []byte(fmt.Sprintf("mp3_%s", videoID)),
+				markup.StyleBgPrimary(),
+			),
+		),
+	)
 }
 
 func scheduleInstagramAudioButtonCleanup(

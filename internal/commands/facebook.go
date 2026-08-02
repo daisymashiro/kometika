@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gotd/td/telegram/message/markup"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"go.uber.org/zap"
@@ -91,16 +92,13 @@ func processFacebook(ctx context.Context, client *tg.Client, lc *LoadingContext,
 
 	var replyMarkup tg.ReplyMarkupClass
 	if data.AudioURL != "" && data.ID != "" {
-		replyMarkup = &tg.ReplyInlineMarkup{
-			Rows: []tg.KeyboardButtonRow{
-				{Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonCallback{
-						Text: "🎵 Unduh Audio (MP3)",
-						Data: []byte(fmt.Sprintf("mp3_%s", data.ID)),
-					},
-				}},
-			},
-		}
+		replyMarkup = markup.InlineKeyboard(
+			markup.Row(
+				markup.Callback("📥 Unduh Audio (MP3)", []byte(fmt.Sprintf("mp3_%s", data.ID)),
+					markup.StyleBgPrimary(),
+				),
+			),
+		)
 	}
 
 	caption := fmt.Sprintf("📘 %s\n\n@Kometika_bot", title)

@@ -65,6 +65,8 @@ func (r *CommandRouter) RouteCommand(ctx context.Context, msg *tg.Message, entit
 		return r.handleMusic(ctx, msg, entities, args)
 	case "botmode":
 		return r.handleBotMode(ctx, msg, entities)
+	case "help":
+		return r.handleHelp(ctx, msg, entities, user)
 	default:
 		return nil
 	}
@@ -311,4 +313,8 @@ func (r *CommandRouter) handleMusic(ctx context.Context, msg *tg.Message, entiti
 	url := args[0]
 	// Panggil handler music yang baru kita buat
 	return HandleMusicCommand(ctx, r.client, msg, entities, url, r.logger)
+}
+
+func (r *CommandRouter) handleHelp(ctx context.Context, msg *tg.Message, entities tg.Entities, user *tg.User) error {
+	return HandleHelpCommand(ctx, r.client, msg, entities, user, r.logger)
 }
