@@ -26,7 +26,7 @@ const (
 	teraboxUSERID     = "320067180347"
 	teraboxDEVUID     = "TBIMXV2-O_E58C50CDB6B04EF889B1B7B0FE0A57CB-C_0-D_99IEPI7RT-M_0068EB688271-V_8C6A2F6D"
 	teraboxUSER_AGENT = "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox"
-	proxyAPI          = "https://tera-proxy.givace1540.workers.dev/generate"
+	proxyAPI          = "https://gabutproxy.xa507z7g.workers.dev/generate"
 
 	// maxTeraboxWorkers membatasi konkurensi ke API Terabox & proxy stream.
 	// ponytail: jadikan configurable via env kalau akun mulai kena rate-limit.

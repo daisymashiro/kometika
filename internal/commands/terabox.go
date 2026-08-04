@@ -106,10 +106,17 @@ func getTeraboxStream(ctx context.Context, dlURL string) (io.ReadCloser, error) 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("User-Agent", "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox")
 	req.Header.Set("Accept", "*/*")
 
-	// Timeout dikosongkan agar file besar tidak terputus saat diunduh
+	if strings.Contains(dlURL, "terabox.com") {
+		ndus := os.Getenv("TERABOX_NDUS")
+		if ndus == "" {
+			ndus = "YVpRgB8peHuioBg2od16nL6d818WSLZg1nbJ8Tuv"
+		}
+		req.AddCookie(&http.Cookie{Name: "ndus", Value: ndus})
+	}
+
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -132,14 +139,12 @@ func HandleTerabox(ctx context.Context, client *tg.Client, msg *tg.Message, enti
 		return nil
 	}
 
-	// Deteksi ID Pengirim (Support DM dan Grup)
 	var userID int64
 	if msg.FromID != nil {
 		if p, ok := msg.FromID.(*tg.PeerUser); ok {
 			userID = p.UserID
 		}
 	}
-	// Fallback jika FromID nil (sering terjadi di Private Chat)
 	if userID == 0 && msg.PeerID != nil {
 		if p, ok := msg.PeerID.(*tg.PeerUser); ok {
 			userID = p.UserID
@@ -154,7 +159,7 @@ func HandleTerabox(ctx context.Context, client *tg.Client, msg *tg.Message, enti
 	isOwner := (ownerID != 0 && userID == ownerID)
 
 	if _, isPrivate := msg.PeerID.(*tg.PeerUser); !isPrivate {
-		return nil // Abaikan jika bukan DM / Grup biasa (misal command nyasar)
+		return nil
 	}
 
 	switch msg.PeerID.(type) {
@@ -564,19 +569,25 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 
 	if action == "down" {
 		media.AnswerCallback(ctx, client, update.QueryID, "", false)
-		downloadURL := fileTarget.DownloadURL
+
+		downloadURL := fileTarget.StreamURL
+		if downloadURL == "" {
+			downloadURL = fileTarget.DownloadURL
+		}
+
 		if downloadURL == "" {
 			_ = media.SendHTML(ctx, client, peer, "❌ Download URL tidak tersedia untuk file ini.")
 			return nil
 		}
+
 		sizeBytes := parseFileSizeToBytes(fileTarget.FileSize)
 		const maxSize = 400 * 1024 * 1024 // 400 MB
 
 		if sizeBytes < maxSize {
-			// Memanggil getTeraboxStream secara native alih-alih API Stream
+			logger.Info("Mulai mengunduh file single", zap.String("filename", fileTarget.FileName), zap.String("url", downloadURL))
 			stream, err := getTeraboxStream(ctx, downloadURL)
 			if err != nil {
-				zap.L().Error("Gagal stream file Terabox", zap.Error(err), zap.String("url", downloadURL))
+				logger.Error("Gagal stream file Terabox", zap.Error(err), zap.String("url", downloadURL))
 				_ = media.SendHTML(ctx, client, peer, "❌ Gagal mengambil stream file.")
 				return nil
 			}
@@ -606,7 +617,10 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 				ctx, peer, fullStream, info, fileTarget.FileName, captionPlain, nil, nil, thumbFile,
 			)
 			if err != nil {
+				logger.Error("Gagal mengirim file ke Telegram", zap.Error(err), zap.String("filename", fileTarget.FileName))
 				_ = media.SendHTML(ctx, client, peer, "❌ Gagal mengirim file.")
+			} else {
+				logger.Info("File single berhasil dikirim ke Telegram", zap.String("filename", fileTarget.FileName))
 			}
 		} else {
 			shortURL, err := api.ShortenWithFallback(downloadURL)
@@ -633,6 +647,7 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terabox.TeraboxUniversalData, reqID string, menuMsgID int, logger *zap.Logger) {
 	ctx := context.Background()
 
+	logger.Info("Memulai proses unduh batch ZIP", zap.Int("total_files", len(files)), zap.String("reqID", reqID))
 	_ = media.EditHTML(ctx, client, peer, menuMsgID, "⏳ <b>Mendownload file ke server...</b>\nProses mungkin memakan waktu tergantung jumlah dan ukuran file.")
 
 	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("terabox_%s_*", reqID))
@@ -648,8 +663,13 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 	var dlErrors []string
 	var mu sync.Mutex
 
-	for _, f := range files {
-		if f.DownloadURL == "" {
+	for i, f := range files {
+		targetURL := f.StreamURL
+		if targetURL == "" {
+			targetURL = f.DownloadURL
+		}
+
+		if targetURL == "" {
 			mu.Lock()
 			dlErrors = append(dlErrors, fmt.Sprintf("%s (No URL)", f.FileName))
 			mu.Unlock()
@@ -657,22 +677,28 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 		}
 
 		wg.Add(1)
-		go func(file terabox.TeraboxUniversalData) {
+		go func(file terabox.TeraboxUniversalData, dlUrl string, index int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			logger.Info("Mulai mengunduh file", zap.String("filename", file.FileName), zap.Int("index", index+1))
+
 			destPath := filepath.Join(tmpDir, file.FileName)
-			err := downloadFileToPath(ctx, file.DownloadURL, destPath)
+			err := downloadFileToPath(ctx, dlUrl, destPath)
 			if err != nil {
 				mu.Lock()
 				dlErrors = append(dlErrors, fmt.Sprintf("%s (%v)", file.FileName, err))
 				mu.Unlock()
+				logger.Error("Gagal mengunduh file", zap.String("filename", file.FileName), zap.Error(err))
+			} else {
+				logger.Info("Selesai mengunduh file", zap.String("filename", file.FileName))
 			}
-		}(f)
+		}(f, targetURL, i)
 	}
 
 	wg.Wait()
+	logger.Info("Semua file selesai diunduh", zap.Int("error_count", len(dlErrors)))
 
 	if len(dlErrors) == len(files) {
 		logger.Error("Semua file gagal diunduh", zap.Strings("errors", dlErrors))
@@ -680,6 +706,7 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 		return
 	}
 
+	logger.Info("Mulai kompresi ZIP", zap.String("zip_path", filepath.Join(os.TempDir(), fmt.Sprintf("TeraboxBatch_%s.zip", reqID))))
 	_ = media.EditHTML(ctx, client, peer, menuMsgID, "📦 <b>Mengkompresi file menjadi ZIP...</b>")
 
 	zipFilePath := filepath.Join(os.TempDir(), fmt.Sprintf("TeraboxBatch_%s.zip", reqID))
@@ -692,6 +719,7 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 		return
 	}
 
+	logger.Info("Mulai upload ZIP ke Telegram", zap.String("zip_path", zipFilePath))
 	_ = media.EditHTML(ctx, client, peer, menuMsgID, "🚀 <b>Mengunggah ZIP ke Telegram...</b>")
 
 	up := uploader.NewUploader(client).WithThreads(2)
@@ -725,27 +753,16 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 		return
 	}
 
+	logger.Info("ZIP berhasil dikirim ke Telegram", zap.String("reqID", reqID))
 	_ = deleteGroupMessage(ctx, client, peer, menuMsgID)
 }
 
 func downloadFileToPath(ctx context.Context, url string, dest string) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	stream, err := getTeraboxStream(ctx, url)
 	if err != nil {
 		return err
 	}
-
-	req.Header.Set("User-Agent", "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox")
-
-	client := &http.Client{} // Tanpa timeout agar file besar tidak terpotong
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("status HTTP %d", resp.StatusCode)
-	}
+	defer stream.Close()
 
 	out, err := os.Create(dest)
 	if err != nil {
@@ -753,7 +770,7 @@ func downloadFileToPath(ctx context.Context, url string, dest string) error {
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, resp.Body)
+	_, err = io.Copy(out, stream)
 	return err
 }
 
