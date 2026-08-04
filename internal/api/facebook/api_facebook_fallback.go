@@ -19,6 +19,7 @@ func FetchFacebookWithFallback(ctx context.Context, logger *zap.Logger, videoURL
 		fn   func(string) (*FacebookUniversalVideoData, error)
 	}{
 		{"Get VidFB", FetchFacebookGetVidFB},
+		{"Snapsave", FetchFacebookSnapsave},
 		{"FGet Io", FetchFacebookFGet},
 		{"FlyDev", FetchFacebookFlyDev},
 		{"Facebook Vercel", FetchFacebookVercel},
@@ -82,4 +83,3 @@ func FetchFacebookWithFallback(ctx context.Context, logger *zap.Logger, videoURL
 func ResetCircuitBreaker(apiName string) {
 	fbBreaker.Reset(apiName)
 }
-

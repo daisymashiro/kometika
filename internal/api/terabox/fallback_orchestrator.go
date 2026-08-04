@@ -43,10 +43,10 @@ func FetchTeraboxUniversal(teraboxURL string) ([]TeraboxUniversalData, error) {
 		name string
 		fn   func(string) ([]TeraboxUniversalData, error)
 	}{
+		{"Terabox Mayumi", FetchTeraboxDirectUniversal},
 		{"Iteraplay", FetchIteraMediaUniversal},
 		{"FlowVideoPlayer", fetchFlowVideoPlayerUniversal},
 		{"Netlify API", FetchTeraboxAPI2},
-		{"Terabox Mayumi", FetchTeraboxDirectUniversal},
 	}
 
 	var lastErr error

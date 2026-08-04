@@ -1,9 +1,14 @@
 package commands
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,17 +23,16 @@ import (
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 	"go.uber.org/zap"
-	"mybot/internal/log"
 )
 
-// ─── Cache ───────────────────────────────────────────────────────────────────
-
+// --- Cache ---
 type teraboxSession struct {
 	Files       []terabox.TeraboxUniversalData
 	MenuMsgID   int
 	ActionMsgID int
 	Page        int
 	Peer        tg.InputPeerClass
+	IsOwner     bool
 }
 
 var (
@@ -36,38 +40,32 @@ var (
 	tbMutex      sync.RWMutex
 )
 
-// ─── Helper ──────────────────────────────────────────────────────────────────
-
+// --- Helper ---
 func generateShortID() string {
 	b := make([]byte, 4)
 	rand.Read(b)
 	return fmt.Sprintf("%x", b)
 }
 
-// formatFileNameButton memendekkan nama file untuk tombol inline keyboard.
-// Kepala + ekor nama asli dipertahankan, dan ekstensi (format) selalu terlihat.
 func formatFileNameButton(name string) string {
 	const maxRunes = 40
 	runes := []rune(name)
 	if len(runes) <= maxRunes {
 		return name
 	}
-
 	ext := getExt(name)
 	base := name
 	if ext != "" {
 		base = base[:len(base)-len(ext)]
 	}
-
 	baseRunes := []rune(base)
 	head, tail := 24, 8
 	if len(baseRunes) <= head+tail {
 		return base + ext
 	}
-	return string(baseRunes[:head]) + "…" + string(baseRunes[len(baseRunes)-tail:]) + ext
+	return string(baseRunes[:head]) + "..." + string(baseRunes[len(baseRunes)-tail:]) + ext
 }
 
-// getExt mengembalikan ekstensi file (termasuk titik) atau string kosong.
 func getExt(filename string) string {
 	for i := len(filename) - 1; i >= 0; i-- {
 		if filename[i] == '.' {
@@ -84,14 +82,12 @@ func parseFileSizeToBytes(sizeStr string) int64 {
 		MB = 1024 * KB
 		GB = 1024 * MB
 	)
-
 	var value float64
 	var unit string
 	n, _ := fmt.Sscanf(sizeStr, "%f %s", &value, &unit)
 	if n != 2 {
 		fmt.Sscanf(sizeStr, "%f%s", &value, &unit)
 	}
-
 	switch unit {
 	case "KB":
 		return int64(value * KB)
@@ -104,30 +100,73 @@ func parseFileSizeToBytes(sizeStr string) int64 {
 	}
 }
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// getTeraboxStream adalah custom HTTP downloader khusus untuk mem-bypass pemblokiran CDN Terabox
+func getTeraboxStream(ctx context.Context, dlURL string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", dlURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept", "*/*")
 
+	// Timeout dikosongkan agar file besar tidak terputus saat diunduh
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		resp.Body.Close()
+		return nil, fmt.Errorf("status HTTP %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
+}
+
+// --- Entry point ---
 func HandleTerabox(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string) error {
-	// Cek feature toggle
 	fm := config.GetFeatureManager()
 	if !fm.IsEnabled("terabox") {
 		zap.L().Info("Fitur Terabox dinonaktifkan")
 		return nil
 	}
-	if _, isPrivate := msg.PeerID.(*tg.PeerUser); !isPrivate {
-		// Jika bukan Private Chat (artinya Grup/Supergroup/Channel),
-		// langsung kembalikan nil agar bot mengabaikan tanpa error/pesan apapun.
-		return nil
+
+	// Deteksi ID Pengirim (Support DM dan Grup)
+	var userID int64
+	if msg.FromID != nil {
+		if p, ok := msg.FromID.(*tg.PeerUser); ok {
+			userID = p.UserID
+		}
 	}
+	// Fallback jika FromID nil (sering terjadi di Private Chat)
+	if userID == 0 && msg.PeerID != nil {
+		if p, ok := msg.PeerID.(*tg.PeerUser); ok {
+			userID = p.UserID
+		}
+	}
+
+	ownerIDStr := os.Getenv("OWNER_ID")
+	var ownerID int64
+	if ownerIDStr != "" {
+		ownerID, _ = strconv.ParseInt(ownerIDStr, 10, 64)
+	}
+	isOwner := (ownerID != 0 && userID == ownerID)
+
+	if _, isPrivate := msg.PeerID.(*tg.PeerUser); !isPrivate {
+		return nil // Abaikan jika bukan DM / Grup biasa (misal command nyasar)
+	}
+
 	switch msg.PeerID.(type) {
 	case *tg.PeerUser:
-		return handleTeraboxPrivate(ctx, client, msg, url)
+		return handleTeraboxPrivate(ctx, client, msg, url, isOwner)
 	case *tg.PeerChat, *tg.PeerChannel:
-		return handleTeraboxGroup(ctx, client, msg, entities, url)
+		return handleTeraboxGroup(ctx, client, msg, entities, url, isOwner)
 	}
 	return nil
 }
 
-func handleTeraboxPrivate(ctx context.Context, client *tg.Client, msg *tg.Message, url string) error {
+func handleTeraboxPrivate(ctx context.Context, client *tg.Client, msg *tg.Message, url string, isOwner bool) error {
 	peerUser := msg.PeerID.(*tg.PeerUser)
 	accessHash, err := GetUserAccessHash(ctx, client, peerUser.UserID)
 	if err != nil {
@@ -135,10 +174,10 @@ func handleTeraboxPrivate(ctx context.Context, client *tg.Client, msg *tg.Messag
 		return nil
 	}
 	peer := &tg.InputPeerUser{UserID: peerUser.UserID, AccessHash: accessHash}
-	return fetchAndShowTerabox(ctx, client, peer, url, nil)
+	return fetchAndShowTerabox(ctx, client, peer, url, nil, isOwner)
 }
 
-func handleTeraboxGroup(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string) error {
+func handleTeraboxGroup(ctx context.Context, client *tg.Client, msg *tg.Message, entities tg.Entities, url string, isOwner bool) error {
 	peer, err := GetPeerFromMessage(ctx, client, msg, entities)
 	if err != nil || peer == nil {
 		zap.L().Error("Gagal dapatkan peer grup Terabox", zap.Error(err))
@@ -146,12 +185,11 @@ func handleTeraboxGroup(ctx context.Context, client *tg.Client, msg *tg.Message,
 	}
 	topicID := getTopicID(msg)
 	replyTo := buildReplyTo(msg.ID, topicID)
-	return fetchAndShowTerabox(ctx, client, peer, url, replyTo)
+	return fetchAndShowTerabox(ctx, client, peer, url, replyTo, isOwner)
 }
 
-// ─── Core logic ──────────────────────────────────────────────────────────────
-
-func fetchAndShowTerabox(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, url string, replyTo *tg.InputReplyToMessage) error {
+// --- Core logic ---
+func fetchAndShowTerabox(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, url string, replyTo *tg.InputReplyToMessage, isOwner bool) error {
 	loadingReq := &tg.MessagesSendMessageRequest{
 		Peer:     peer,
 		Message:  "⏳ Mengambil data Terabox, mohon tunggu...",
@@ -160,6 +198,7 @@ func fetchAndShowTerabox(ctx context.Context, client *tg.Client, peer tg.InputPe
 	if replyTo != nil {
 		loadingReq.SetReplyTo(replyTo)
 	}
+
 	loadingUpdates, _ := client.MessagesSendMessage(ctx, loadingReq)
 	var loadingMsgID int
 	if loadingUpdates != nil {
@@ -175,15 +214,15 @@ func fetchAndShowTerabox(ctx context.Context, client *tg.Client, peer tg.InputPe
 		return nil
 	}
 	zap.L().Info("Berhasil fetch Terabox", zap.Int("total_files", len(files)))
-	// hapus pesan load
+
 	if loadingMsgID != 0 {
 		deleteGroupMessage(ctx, client, peer, loadingMsgID)
 	}
 
 	reqID := generateShortID()
-	markup := buildTeraboxFileMarkup(files, reqID, 0)
-	plainText := fmt.Sprintf("🗂 Data Terabox Ditemukan!\nTotal File: %d\n\nPilih file untuk diunduh:", len(files))
+	markup := buildTeraboxFileMarkup(files, reqID, 0, isOwner)
 
+	plainText := fmt.Sprintf("✅ Data Terabox Ditemukan!\nTotal File: %d\n\nPilih file untuk diunduh:", len(files))
 	menuReq := &tg.MessagesSendMessageRequest{
 		Peer:        peer,
 		Message:     plainText,
@@ -193,45 +232,44 @@ func fetchAndShowTerabox(ctx context.Context, client *tg.Client, peer tg.InputPe
 	if replyTo != nil {
 		menuReq.SetReplyTo(replyTo)
 	}
+
 	menuUpdates, err := client.MessagesSendMessage(ctx, menuReq)
 	var menuMsgID int
 	if err == nil && menuUpdates != nil {
 		menuMsgID, _ = media.ExtractMessageID(menuUpdates)
-	}
 
-	// 5. Simpan ke cache
-	tbMutex.Lock()
-	teraboxCache[reqID] = teraboxSession{
-		Files:       files,
-		MenuMsgID:   menuMsgID,
-		ActionMsgID: 0,
-		Page:        0,
-		Peer:        peer,
-	}
-	tbMutex.Unlock()
-
-	// 6. Timer 5m30s: hapus pesan menu dan action, bersihkan cache
-	time.AfterFunc(5*time.Minute+30*time.Second, func() {
 		tbMutex.Lock()
-		sess, exists := teraboxCache[reqID]
-		delete(teraboxCache, reqID)
-		tbMutex.Unlock()
-		if exists {
-			if sess.MenuMsgID != 0 {
-				deleteGroupMessage(context.Background(), client, sess.Peer, sess.MenuMsgID)
-			}
-			if sess.ActionMsgID != 0 {
-				deleteGroupMessage(context.Background(), client, sess.Peer, sess.ActionMsgID)
-			}
-			zap.L().Info("Pesan menu/action Terabox dihapus otomatis", zap.String("reqID", reqID))
+		teraboxCache[reqID] = teraboxSession{
+			Files:       files,
+			MenuMsgID:   menuMsgID,
+			ActionMsgID: 0,
+			Page:        0,
+			Peer:        peer,
+			IsOwner:     isOwner,
 		}
-	})
+		tbMutex.Unlock()
 
+		time.AfterFunc(5*time.Minute+30*time.Second, func() {
+			tbMutex.Lock()
+			sess, exists := teraboxCache[reqID]
+			delete(teraboxCache, reqID)
+			tbMutex.Unlock()
+
+			if exists {
+				if sess.MenuMsgID != 0 {
+					deleteGroupMessage(context.Background(), client, sess.Peer, sess.MenuMsgID)
+				}
+				if sess.ActionMsgID != 0 {
+					deleteGroupMessage(context.Background(), client, sess.Peer, sess.ActionMsgID)
+				}
+				zap.L().Info("Pesan menu/action Terabox dihapus otomatis", zap.String("reqID", reqID))
+			}
+		})
+	}
 	return nil
 }
 
-// buildTeraboxFileMarkup membuat inline keyboard daftar file dengan pagination.
-func buildTeraboxFileMarkup(files []terabox.TeraboxUniversalData, reqID string, page int) *tg.ReplyInlineMarkup {
+func buildTeraboxFileMarkup(files []terabox.TeraboxUniversalData, reqID string, page int, isOwner bool) *tg.ReplyInlineMarkup {
 	var rows []tg.KeyboardButtonRow
 	start := page * 8
 	end := min(start+8, len(files))
@@ -256,22 +294,33 @@ func buildTeraboxFileMarkup(files []terabox.TeraboxUniversalData, reqID string, 
 	}
 	rows = append(rows, tg.KeyboardButtonRow{Buttons: navButtons})
 
+	if isOwner {
+		rows = append(rows, tg.KeyboardButtonRow{
+			Buttons: []tg.KeyboardButtonClass{
+				markup.Callback("📦 UNDUH SEMUA (ZIP)", []byte(fmt.Sprintf("tb_zipdl_%s", reqID)), markup.StyleBgPrimary()),
+			},
+		})
+	}
+
 	return &tg.ReplyInlineMarkup{Rows: rows}
 }
 
-// sendTeraboxMenu dipakai untuk navigasi halaman (edit pesan yang ada).
 func sendTeraboxMenu(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, msgID int, reqID string, page int) error {
 	tbMutex.RLock()
 	sess, exists := teraboxCache[reqID]
 	tbMutex.RUnlock()
+
 	if !exists {
-		return media.EditHTML(ctx, client, peer, msgID, "❌ Sesi Terabox telah kadaluarsa. Silakan kirim ulang link.")
+		return media.EditHTML(ctx, client, peer, msgID, "⏳ Sesi Terabox telah kadaluarsa. Silakan kirim ulang link.")
 	}
-	fm := buildTeraboxFileMarkup(sess.Files, reqID, page)
-	plainText := fmt.Sprintf("🗂 Data Terabox Ditemukan!\nTotal File: %d\nHalaman: %d\n\nPilih file untuk diunduh:", len(sess.Files), page+1)
+
+	fm := buildTeraboxFileMarkup(sess.Files, reqID, page, sess.IsOwner)
+	plainText := fmt.Sprintf("✅ Data Terabox Ditemukan!\nTotal File: %d\nHalaman: %d\n\nPilih file untuk diunduh:", len(sess.Files), page+1)
+
 	if err := media.EditWithMarkup(ctx, client, peer, msgID, plainText, fm); err != nil {
 		return err
 	}
+
 	tbMutex.Lock()
 	if s, ok := teraboxCache[reqID]; ok {
 		s.Page = page
@@ -285,11 +334,14 @@ func sendNewTeraboxMenu(ctx context.Context, client *tg.Client, peer tg.InputPee
 	tbMutex.RLock()
 	sess, exists := teraboxCache[reqID]
 	tbMutex.RUnlock()
+
 	if !exists {
 		return 0, fmt.Errorf("sesi tidak ditemukan")
 	}
-	fm := buildTeraboxFileMarkup(sess.Files, reqID, page)
-	plainText := fmt.Sprintf("🗂 Data Terabox Ditemukan!\nTotal File: %d\nHalaman: %d\n\nPilih file untuk diunduh:", len(sess.Files), page+1)
+
+	fm := buildTeraboxFileMarkup(sess.Files, reqID, page, sess.IsOwner)
+	plainText := fmt.Sprintf("✅ Data Terabox Ditemukan!\nTotal File: %d\nHalaman: %d\n\nPilih file untuk diunduh:", len(sess.Files), page+1)
+
 	reqSend := &tg.MessagesSendMessageRequest{
 		Peer:        peer,
 		Message:     plainText,
@@ -299,6 +351,7 @@ func sendNewTeraboxMenu(ctx context.Context, client *tg.Client, peer tg.InputPee
 	if replyTo != nil {
 		reqSend.SetReplyTo(replyTo)
 	}
+
 	updates, err := client.MessagesSendMessage(ctx, reqSend)
 	if err != nil {
 		return 0, err
@@ -307,26 +360,21 @@ func sendNewTeraboxMenu(ctx context.Context, client *tg.Client, peer tg.InputPee
 	return msgID, nil
 }
 
-// buildActionMarkup membuat keyboard untuk aksi (Stream, Download, Kembali)
 func buildActionMarkup(reqID string, index int, hasStream bool) *tg.ReplyInlineMarkup {
 	var buttons []tg.KeyboardButtonClass
 	if hasStream {
 		buttons = append(buttons, markup.Callback("▶️ Stream", fmt.Appendf(nil, "tb_stream_%s_%d", reqID, index), markup.StyleBgSuccess()))
 	}
-	buttons = append(buttons,
-		markup.Callback("⬇️ Download", fmt.Appendf(nil, "tb_down_%s_%d", reqID, index), markup.StyleBgSuccess()),
-		markup.Callback("🔙 Kembali", fmt.Appendf(nil, "tb_back_%s", reqID), markup.StyleBgDanger()),
-	)
+	buttons = append(buttons, markup.Callback("⬇️ Download", fmt.Appendf(nil, "tb_down_%s_%d", reqID, index), markup.StyleBgSuccess()))
+	buttons = append(buttons, markup.Callback("🔙 Kembali", fmt.Appendf(nil, "tb_back_%s", reqID), markup.StyleBgDanger()))
 	return &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{{Buttons: buttons}}}
 }
 
-// ─── Callback handler ────────────────────────────────────────────────────────
-
+// --- Callback handler ---
 func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.InputPeerClass, msgID int, update *tg.UpdateBotCallbackQuery, logger *zap.Logger) error {
 	if len(update.Data) == 0 {
 		return nil
 	}
-
 	rawData := string(update.Data)
 	parts := strings.Split(rawData, "_")
 	if len(parts) < 3 {
@@ -337,7 +385,6 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 	action := parts[1]
 	reqID := parts[2]
 
-	// ── close ──
 	if action == "close" {
 		tbMutex.Lock()
 		_, exists := teraboxCache[reqID]
@@ -350,19 +397,17 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 		return nil
 	}
 
-	// Cek sesi masih ada
 	tbMutex.RLock()
 	sess, exists := teraboxCache[reqID]
 	tbMutex.RUnlock()
+
 	if !exists {
-		media.AnswerCallback(ctx, client, update.QueryID, "❌ Sesi kadaluarsa. Kirim ulang link.", true)
+		media.AnswerCallback(ctx, client, update.QueryID, "⏳ Sesi kadaluarsa. Kirim ulang link.", true)
 		return nil
 	}
 
-	// ── page ── (navigasi halaman)
 	if action == "page" {
 		if len(parts) < 4 {
-			media.AnswerCallback(ctx, client, update.QueryID, "Data tidak lengkap", true)
 			return nil
 		}
 		pageVal, _ := strconv.Atoi(parts[3])
@@ -371,7 +416,6 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 		return nil
 	}
 
-	// ── back ── (kembali ke menu file dari pesan aksi)
 	if action == "back" {
 		if sess.ActionMsgID != 0 {
 			deleteGroupMessage(ctx, client, peer, sess.ActionMsgID)
@@ -381,16 +425,13 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 			media.AnswerCallback(ctx, client, update.QueryID, "Gagal memuat menu", true)
 			return nil
 		}
-		// Update cache: MenuMsgID = newMenuID, ActionMsgID = 0
 		tbMutex.Lock()
 		if s, ok := teraboxCache[reqID]; ok {
 			s.MenuMsgID = newMenuID
 			s.ActionMsgID = 0
-			s.Page = sess.Page
 			teraboxCache[reqID] = s
 		}
 		tbMutex.Unlock()
-		// Hapus pesan lama (menu sebelumnya yang mungkin masih ada)
 		if msgID != 0 && msgID != newMenuID {
 			deleteGroupMessage(ctx, client, peer, msgID)
 		}
@@ -398,11 +439,34 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 		return nil
 	}
 
-	// Aksi yang memerlukan index file (dl, stream, down)
+	// --- HANDLER DOWNLOAD ZIP (KHUSUS OWNER) ---
+	if action == "zipdl" {
+		ownerIDStr := os.Getenv("OWNER_ID")
+		var ownerID int64
+		if ownerIDStr != "" {
+			ownerID, _ = strconv.ParseInt(ownerIDStr, 10, 64)
+		}
+
+		if ownerID == 0 || update.UserID != ownerID {
+			media.AnswerCallback(ctx, client, update.QueryID, "❌ Hanya owner yang dapat menggunakan fitur ini.", true)
+			return nil
+		}
+
+		media.AnswerCallback(ctx, client, update.QueryID, "Memproses unduhan paralel & ZIP...", false)
+
+		tbMutex.Lock()
+		delete(teraboxCache, reqID)
+		tbMutex.Unlock()
+
+		go processZipDownload(client, peer, sess.Files, reqID, msgID, logger)
+		return nil
+	}
+
 	if len(parts) < 4 {
 		media.AnswerCallback(ctx, client, update.QueryID, "Data tidak lengkap", true)
 		return nil
 	}
+
 	indexVal, _ := strconv.Atoi(parts[3])
 	if indexVal < 0 || indexVal >= len(sess.Files) {
 		media.AnswerCallback(ctx, client, update.QueryID, "❌ File tidak ditemukan.", true)
@@ -410,55 +474,39 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 	}
 	fileTarget := sess.Files[indexVal]
 
-	// ── dl: user memilih file dari menu → tampilkan aksi (thumbnail + tombol) dan hapus menu lama
 	if action == "dl" {
 		media.AnswerCallback(ctx, client, update.QueryID, "", false)
-
 		if sess.MenuMsgID != 0 {
 			deleteGroupMessage(ctx, client, peer, sess.MenuMsgID)
 		}
 
 		htmlCaption := fmt.Sprintf("File Name: %s \n\nPilih aksi:", fileTarget.FileName)
 		markup := buildActionMarkup(reqID, indexVal, fileTarget.StreamURL != "")
-
-		logger.Info("File target",
-			zap.String("filename", fileTarget.FileName),
-			zap.String("stream_url", fileTarget.StreamURL),
-			zap.String("download_url", fileTarget.DownloadURL),
-		)
-
 		var actionMsgID int
 
-		// Kirim thumbnail (jika ada) sebagai foto + keyboard, atau kirim teks biasa + keyboard
 		if fileTarget.Thumbnail != "" {
 			data, err := api.GetThumbnail(ctx, fileTarget.Thumbnail)
 			if err != nil {
-				logger.Warn("Gagal download thumbnail", zap.String("url", fileTarget.Thumbnail), zap.Error(err))
 				reqSend := &tg.MessagesSendMessageRequest{
 					Peer:        peer,
 					Message:     htmlCaption,
 					RandomID:    time.Now().UnixNano(),
 					ReplyMarkup: markup,
 				}
-				updates, err := client.MessagesSendMessage(ctx, reqSend)
-				if err == nil {
-					actionMsgID, _ = media.ExtractMessageID(updates)
-				}
+				updates, _ := client.MessagesSendMessage(ctx, reqSend)
+				actionMsgID, _ = media.ExtractMessageID(updates)
 			} else {
 				up := uploader.NewUploader(client)
 				inputFile, err := up.FromBytes(ctx, "thumbnail.jpg", data)
 				if err != nil {
-					logger.Warn("Gagal upload thumbnail", zap.Error(err))
 					reqSend := &tg.MessagesSendMessageRequest{
 						Peer:        peer,
 						Message:     htmlCaption,
 						RandomID:    time.Now().UnixNano(),
 						ReplyMarkup: markup,
 					}
-					updates, err := client.MessagesSendMessage(ctx, reqSend)
-					if err == nil {
-						actionMsgID, _ = media.ExtractMessageID(updates)
-					}
+					updates, _ := client.MessagesSendMessage(ctx, reqSend)
+					actionMsgID, _ = media.ExtractMessageID(updates)
 				} else {
 					req := &tg.MessagesSendMediaRequest{
 						Peer:        peer,
@@ -467,29 +515,21 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 						Message:     htmlCaption,
 						ReplyMarkup: markup,
 					}
-					updates, err := client.MessagesSendMedia(ctx, req)
-					if err != nil {
-						logger.Warn("Gagal kirim foto thumbnail", zap.Error(err))
-					} else {
-						actionMsgID, _ = media.ExtractMessageID(updates)
-					}
+					updates, _ := client.MessagesSendMedia(ctx, req)
+					actionMsgID, _ = media.ExtractMessageID(updates)
 				}
 			}
 		} else {
-			// Tidak ada thumbnail, kirim pesan teks
 			reqSend := &tg.MessagesSendMessageRequest{
 				Peer:        peer,
 				Message:     htmlCaption,
 				RandomID:    time.Now().UnixNano(),
 				ReplyMarkup: markup,
 			}
-			updates, err := client.MessagesSendMessage(ctx, reqSend)
-			if err == nil {
-				actionMsgID, _ = media.ExtractMessageID(updates)
-			}
+			updates, _ := client.MessagesSendMessage(ctx, reqSend)
+			actionMsgID, _ = media.ExtractMessageID(updates)
 		}
 
-		// Update cache: set MenuMsgID = 0 (sudah dihapus), ActionMsgID = actionMsgID
 		tbMutex.Lock()
 		if s, ok := teraboxCache[reqID]; ok {
 			s.MenuMsgID = 0
@@ -500,124 +540,261 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 		return nil
 	}
 
-	// ── stream ──
 	if action == "stream" {
 		media.AnswerCallback(ctx, client, update.QueryID, "", false)
-
 		if fileTarget.StreamURL == "" {
 			_ = media.SendHTML(ctx, client, peer, "❌ Tidak ada URL stream untuk file ini.")
 			return nil
 		}
-
 		shortURL, err := api.ShortenWithFallback(fileTarget.StreamURL)
 		if err != nil {
 			shortURL = fileTarget.StreamURL
 		}
-		htmlMsg := fmt.Sprintf("▶️ %s\n\n@Kometika_bot", fileTarget.FileName)
-		streamMarkup := markup.InlineKeyboard(markup.Row(markup.URL("🔗 Buka Stream", shortURL, markup.StyleBgSuccess())))
+		htmlMsg := fmt.Sprintf("🎬 %s\n\n@Kometika_bot", fileTarget.FileName)
+		streamMarkup := markup.InlineKeyboard(markup.Row(markup.URL("▶️ Buka Stream", shortURL, markup.StyleBgSuccess())))
 		reqSend := &tg.MessagesSendMessageRequest{
 			Peer:        peer,
 			Message:     htmlMsg,
 			RandomID:    time.Now().UnixNano(),
 			ReplyMarkup: streamMarkup,
 		}
-		if _, err := client.MessagesSendMessage(ctx, reqSend); err != nil {
-			logger.Warn("Gagal kirim tombol stream", zap.Error(err))
-		}
+		_, _ = client.MessagesSendMessage(ctx, reqSend)
 		return nil
 	}
 
-	// ── down ──
 	if action == "down" {
 		media.AnswerCallback(ctx, client, update.QueryID, "", false)
-
 		downloadURL := fileTarget.DownloadURL
-		if fileTarget.StreamURL != "" {
-			downloadURL = fileTarget.StreamURL
+		if downloadURL == "" {
+			_ = media.SendHTML(ctx, client, peer, "❌ Download URL tidak tersedia untuk file ini.")
+			return nil
 		}
-
 		sizeBytes := parseFileSizeToBytes(fileTarget.FileSize)
 		const maxSize = 400 * 1024 * 1024 // 400 MB
 
 		if sizeBytes < maxSize {
-			// Ambil stream
-			stream, _, err := api.GetVideoStream(ctx, downloadURL)
+			// Memanggil getTeraboxStream secara native alih-alih API Stream
+			stream, err := getTeraboxStream(ctx, downloadURL)
 			if err != nil {
-				logger.Error("Gagal stream file", zap.Error(err))
-				log.LogError(ctx, "TeraboxStream", err, "filename="+fileTarget.FileName, "url="+downloadURL)
+				zap.L().Error("Gagal stream file Terabox", zap.Error(err), zap.String("url", downloadURL))
 				_ = media.SendHTML(ctx, client, peer, "❌ Gagal mengambil stream file.")
 				return nil
 			}
 			defer stream.Close()
 
-			// ═══ DETEKSI TIPE KONTEN OTOMATIS ═══
-			info, fullStream, err := api.DetectAndClassifyStream(stream)
-			if err != nil {
-				logger.Warn("Gagal deteksi tipe konten, fallback ke dokumen", zap.Error(err))
-				// Fallback: gunakan info default untuk dokumen
+			info, fullStream, _ := api.DetectAndClassifyStream(stream)
+			if info.Category == api.ContentUnknown || info.Category == "" {
 				info = api.ContentTypeInfo{
 					MimeType:  "application/octet-stream",
 					Category:  api.ContentDocument,
 					Extension: "",
 				}
-				fullStream = stream // stream asli (tanpa 512 byte) – data awal mungkin hilang
 			}
 
-			// ═══ PERSIAPAN THUMBNAIL ═══
 			var thumbFile tg.InputFileClass
 			if fileTarget.Thumbnail != "" {
 				thumbData, err := api.GetThumbnail(ctx, fileTarget.Thumbnail)
 				if err == nil && len(thumbData) > 0 {
 					upThumb := uploader.NewUploader(client)
 					thumbFile, _ = upThumb.FromBytes(ctx, "thumb_terabox.jpg", thumbData)
-					logger.Info("Thumbnail berhasil disiapkan", zap.String("filename", fileTarget.FileName))
-				} else {
-					logger.Warn("Gagal download thumbnail untuk file", zap.String("filename", fileTarget.FileName), zap.Error(err))
 				}
 			}
 
-			captionPlain := fmt.Sprintf("📁 %s\n\n@Kometika_bot", fileTarget.FileName)
-
-			// ═══ KIRIM DENGAN DYNAMIC STREAM ═══
+			captionPlain := fmt.Sprintf("📄 %s\n\n@Kometika_bot", fileTarget.FileName)
 			mediaSender := media.NewMediaSender(client)
 			_, err = mediaSender.SendDynamicStream(
-				ctx,
-				peer,
-				fullStream,
-				info,
-				fileTarget.FileName,
-				captionPlain,
-				nil, // replyMarkup
-				nil, // replyTo (tidak digunakan di sini)
-				thumbFile,
+				ctx, peer, fullStream, info, fileTarget.FileName, captionPlain, nil, nil, thumbFile,
 			)
-
 			if err != nil {
-				logger.Error("Gagal upload ke Telegram", zap.Error(err))
 				_ = media.SendHTML(ctx, client, peer, "❌ Gagal mengirim file.")
-			} else {
-				logger.Info("Upload sukses", zap.String("filename", fileTarget.FileName))
 			}
 		} else {
-			// File > 400 MB: kirim D-URL pendek sebagai tombol
 			shortURL, err := api.ShortenWithFallback(downloadURL)
 			if err != nil {
 				shortURL = downloadURL
 			}
-			htmlMsg := fmt.Sprintf("⬇️ %s\n\n📦 Ukuran: %s\n\n@Kometika_bot", fileTarget.FileName, fileTarget.FileSize)
-			downMarkup := markup.InlineKeyboard(markup.Row(markup.URL("🔗 Unduh File", shortURL, markup.StyleBgSuccess())))
+			htmlMsg := fmt.Sprintf("📄 %s\n\n⚖️ Ukuran: %s\n\n@Kometika_bot", fileTarget.FileName, fileTarget.FileSize)
+			downMarkup := markup.InlineKeyboard(markup.Row(markup.URL("⬇️ Unduh File", shortURL, markup.StyleBgSuccess())))
 			reqSend := &tg.MessagesSendMessageRequest{
 				Peer:        peer,
 				Message:     htmlMsg,
 				RandomID:    time.Now().UnixNano(),
 				ReplyMarkup: downMarkup,
 			}
-			if _, err := client.MessagesSendMessage(ctx, reqSend); err != nil {
-				logger.Warn("Gagal kirim tombol unduh", zap.Error(err))
-			}
+			_, _ = client.MessagesSendMessage(ctx, reqSend)
 		}
 		return nil
 	}
 
 	return nil
+}
+
+// --- LOGIKA UNDUH SEMUA (ZIP) UNTUK OWNER ---
+func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terabox.TeraboxUniversalData, reqID string, menuMsgID int, logger *zap.Logger) {
+	ctx := context.Background()
+
+	_ = media.EditHTML(ctx, client, peer, menuMsgID, "⏳ <b>Mendownload file ke server...</b>\nProses mungkin memakan waktu tergantung jumlah dan ukuran file.")
+
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("terabox_%s_*", reqID))
+	if err != nil {
+		logger.Error("Gagal membuat direktori temporary", zap.Error(err))
+		_ = media.EditHTML(ctx, client, peer, menuMsgID, "❌ Gagal menginisialisasi penyimpanan di server.")
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 3)
+	var dlErrors []string
+	var mu sync.Mutex
+
+	for _, f := range files {
+		if f.DownloadURL == "" {
+			mu.Lock()
+			dlErrors = append(dlErrors, fmt.Sprintf("%s (No URL)", f.FileName))
+			mu.Unlock()
+			continue
+		}
+
+		wg.Add(1)
+		go func(file terabox.TeraboxUniversalData) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			destPath := filepath.Join(tmpDir, file.FileName)
+			err := downloadFileToPath(ctx, file.DownloadURL, destPath)
+			if err != nil {
+				mu.Lock()
+				dlErrors = append(dlErrors, fmt.Sprintf("%s (%v)", file.FileName, err))
+				mu.Unlock()
+			}
+		}(f)
+	}
+
+	wg.Wait()
+
+	if len(dlErrors) == len(files) {
+		logger.Error("Semua file gagal diunduh", zap.Strings("errors", dlErrors))
+		_ = media.EditHTML(ctx, client, peer, menuMsgID, "❌ Gagal mendownload seluruh file.")
+		return
+	}
+
+	_ = media.EditHTML(ctx, client, peer, menuMsgID, "📦 <b>Mengkompresi file menjadi ZIP...</b>")
+
+	zipFilePath := filepath.Join(os.TempDir(), fmt.Sprintf("TeraboxBatch_%s.zip", reqID))
+	defer os.Remove(zipFilePath)
+
+	err = createZipFromDir(tmpDir, zipFilePath)
+	if err != nil {
+		logger.Error("Gagal membuat ZIP", zap.Error(err))
+		_ = media.EditHTML(ctx, client, peer, menuMsgID, "❌ Gagal membuat file ZIP.")
+		return
+	}
+
+	_ = media.EditHTML(ctx, client, peer, menuMsgID, "🚀 <b>Mengunggah ZIP ke Telegram...</b>")
+
+	up := uploader.NewUploader(client).WithThreads(2)
+	uploadFile, err := up.FromPath(ctx, zipFilePath)
+	if err != nil {
+		logger.Error("Gagal unggah ke Telegram", zap.Error(err))
+		_ = media.EditHTML(ctx, client, peer, menuMsgID, "❌ Gagal mengunggah ZIP ke Telegram (Batas file atau kesalahan jaringan).")
+		return
+	}
+
+	successCount := len(files) - len(dlErrors)
+	caption := fmt.Sprintf("📦 <b>Terabox Batch Download</b>\n\n✅ Berhasil: %d/%d File\n\n@Kometika_bot", successCount, len(files))
+
+	docReq := &tg.MessagesSendMediaRequest{
+		Peer: peer,
+		Media: &tg.InputMediaUploadedDocument{
+			File:     uploadFile,
+			MimeType: "application/zip",
+			Attributes: []tg.DocumentAttributeClass{
+				&tg.DocumentAttributeFilename{FileName: fmt.Sprintf("Terabox_%s.zip", reqID)},
+			},
+		},
+		Message:  caption,
+		RandomID: time.Now().UnixNano(),
+	}
+
+	_, err = client.MessagesSendMedia(ctx, docReq)
+	if err != nil {
+		logger.Error("Gagal kirim media doc ZIP", zap.Error(err))
+		_ = media.EditHTML(ctx, client, peer, menuMsgID, "❌ Terjadi kesalahan saat mengirim dokumen.")
+		return
+	}
+
+	_ = deleteGroupMessage(ctx, client, peer, menuMsgID)
+}
+
+func downloadFileToPath(ctx context.Context, url string, dest string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("User-Agent", "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox")
+
+	client := &http.Client{} // Tanpa timeout agar file besar tidak terpotong
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("status HTTP %d", resp.StatusCode)
+	}
+
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+func createZipFromDir(sourceDir, zipFilePath string) error {
+	zipFile, err := os.Create(zipFilePath)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	archive := zip.NewWriter(zipFile)
+	defer archive.Close()
+
+	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+
+		header.Name = filepath.Base(path)
+		header.Method = zip.Deflate
+
+		writer, err := archive.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		_, err = io.Copy(writer, file)
+		return err
+	})
 }
