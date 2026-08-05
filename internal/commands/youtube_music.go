@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 	"github.com/kkdai/youtube/v2"
 	"go.uber.org/zap"
@@ -91,6 +92,21 @@ func HandleMusicCommand(ctx context.Context, client *tg.Client, msg *tg.Message,
 	}
 	defer stream.Close()
 
+	var thumbFile tg.InputFileClass
+	if len(video.Thumbnails) > 0 {
+		// Ambil resolusi thumbnail terbaik dari YouTube
+		thumbURL := video.Thumbnails[len(video.Thumbnails)-1].URL
+		thumbBytes, errThumb := api.GetThumbnail(ctx, thumbURL)
+
+		if errThumb == nil && len(thumbBytes) > 0 {
+			// Unggah thumbnail ke server Telegram untuk mendapatkan InputFileClass
+			up := uploader.NewUploader(client).WithThreads(1)
+			thumbFile, _ = up.FromBytes(ctx, fmt.Sprintf("thumb_yt_%s.jpg", video.ID), thumbBytes)
+		} else {
+			logger.Warn("Gagal mengunduh thumbnail YouTube", zap.Error(errThumb))
+		}
+	}
+
 	info := api.ContentTypeInfo{
 		MimeType:  "audio/mp4",
 		Category:  api.ContentAudio,
@@ -103,7 +119,7 @@ func HandleMusicCommand(ctx context.Context, client *tg.Client, msg *tg.Message,
 	mediaSender := media.NewMediaSender(client)
 
 	_, err = mediaSender.SendDynamicStream(
-		ctx, peer, stream, info, filename, caption, nil, replyTo, nil,
+		ctx, peer, stream, info, filename, caption, nil, replyTo, thumbFile,
 	)
 
 	// Hapus pesan loading

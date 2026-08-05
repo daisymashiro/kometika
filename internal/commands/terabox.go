@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,19 +76,54 @@ func getExt(filename string) string {
 	return ""
 }
 
+func sanitizeFileName(name string) string {
+	base := filepath.Base(name)
+	// ganti separator/path dan karakter berbahaya
+	base = strings.ReplaceAll(base, "/", "_")
+	base = strings.ReplaceAll(base, "\\", "_")
+	forbidden := []string{":", "*", "?", "\"", "<", ">", "|"}
+	for _, ch := range forbidden {
+		base = strings.ReplaceAll(base, ch, "_")
+	}
+	// hilangkan control chars
+	cleaned := make([]rune, 0, len(base))
+	for _, r := range base {
+		if r >= 32 && r != 127 {
+			cleaned = append(cleaned, r)
+		} else {
+			cleaned = append(cleaned, '_')
+		}
+	}
+	base = strings.TrimSpace(string(cleaned))
+	if base == "" {
+		base = "file"
+	}
+	if len(base) > 200 {
+		base = base[:200]
+	}
+	return base
+}
+
 func parseFileSizeToBytes(sizeStr string) int64 {
-	sizeStr = strings.TrimSpace(strings.ToUpper(sizeStr))
+	s := strings.TrimSpace(strings.ToUpper(strings.ReplaceAll(sizeStr, ",", "")))
+	if s == "" {
+		return 0
+	}
+	re := regexp.MustCompile(`^([\d\.]+)\s*([KMG]?B)?$`)
+	m := re.FindStringSubmatch(s)
+	if m == nil {
+		return 0
+	}
+	value, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0
+	}
+	unit := m[2]
 	const (
 		KB = 1024
 		MB = 1024 * KB
 		GB = 1024 * MB
 	)
-	var value float64
-	var unit string
-	n, _ := fmt.Sscanf(sizeStr, "%f %s", &value, &unit)
-	if n != 2 {
-		fmt.Sscanf(sizeStr, "%f%s", &value, &unit)
-	}
 	switch unit {
 	case "KB":
 		return int64(value * KB)
@@ -96,7 +132,8 @@ func parseFileSizeToBytes(sizeStr string) int64 {
 	case "GB":
 		return int64(value * GB)
 	default:
-		return 201 * MB
+		// no unit -> interpret as bytes
+		return int64(value)
 	}
 }
 
@@ -108,6 +145,8 @@ func getTeraboxStream(ctx context.Context, dlURL string) (io.ReadCloser, error) 
 	}
 	req.Header.Set("User-Agent", "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox")
 	req.Header.Set("Accept", "*/*")
+	// referer kadang dibutuhkan oleh CDN
+	req.Header.Set("Referer", "https://www.terabox.com/")
 
 	if strings.Contains(dlURL, "terabox.com") {
 		ndus := os.Getenv("TERABOX_NDUS")
@@ -117,7 +156,9 @@ func getTeraboxStream(ctx context.Context, dlURL string) (io.ReadCloser, error) 
 		req.AddCookie(&http.Cookie{Name: "ndus", Value: ndus})
 	}
 
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 2 * time.Hour,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -126,6 +167,16 @@ func getTeraboxStream(ctx context.Context, dlURL string) (io.ReadCloser, error) 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
 		return nil, fmt.Errorf("status HTTP %d", resp.StatusCode)
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		// beberapa server tidak memberikan content-type, izinkan tapi hati-hati
+	} else if strings.HasPrefix(strings.ToLower(ct), "text/") || strings.Contains(strings.ToLower(ct), "html") {
+		// kemungkinan redirect ke halaman HTML (interstitial / captcha), anggap gagal
+		// baca sedikit body untuk log/debug
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("unexpected content-type: %s", ct)
 	}
 
 	return resp.Body, nil
@@ -684,15 +735,29 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 
 			logger.Info("Mulai mengunduh file", zap.String("filename", file.FileName), zap.Int("index", index+1))
 
-			destPath := filepath.Join(tmpDir, file.FileName)
-			err := downloadFileToPath(ctx, dlUrl, destPath)
+			// Buat nama file yang aman dan unik
+			safe := sanitizeFileName(file.FileName)
+			destPath := filepath.Join(tmpDir, fmt.Sprintf("%03d_%s", index+1, safe))
+
+			// Coba beberapa kali sebelum dianggap gagal
+			var err error
+			maxAttempts := 3
+			for attempt := 1; attempt <= maxAttempts; attempt++ {
+				err = downloadFileToPath(ctx, dlUrl, destPath)
+				if err == nil {
+					logger.Info("Selesai mengunduh file", zap.String("filename", file.FileName))
+					break
+				}
+				logger.Warn("Gagal mengunduh, akan retry", zap.String("filename", file.FileName), zap.Int("attempt", attempt), zap.Error(err))
+				// backoff sederhana
+				time.Sleep(time.Duration(attempt*2) * time.Second)
+			}
+
 			if err != nil {
 				mu.Lock()
 				dlErrors = append(dlErrors, fmt.Sprintf("%s (%v)", file.FileName, err))
 				mu.Unlock()
 				logger.Error("Gagal mengunduh file", zap.String("filename", file.FileName), zap.Error(err))
-			} else {
-				logger.Info("Selesai mengunduh file", zap.String("filename", file.FileName))
 			}
 		}(f, targetURL, i)
 	}
@@ -764,14 +829,33 @@ func downloadFileToPath(ctx context.Context, url string, dest string) error {
 	}
 	defer stream.Close()
 
-	out, err := os.Create(dest)
+	// pastikan direktori ada
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+
+	tmp := dest + ".part"
+	out, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		out.Close()
+		// jika gagal dan file tmp ada, hapus
+	}()
 
-	_, err = io.Copy(out, stream)
-	return err
+	if _, err := io.Copy(out, stream); err != nil {
+		out.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	out.Close()
+	// pindah ke destinasi final
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func createZipFromDir(sourceDir, zipFilePath string) error {
@@ -797,7 +881,12 @@ func createZipFromDir(sourceDir, zipFilePath string) error {
 			return err
 		}
 
-		header.Name = filepath.Base(path)
+		rel, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+		// zip format expects forward slashes
+		header.Name = filepath.ToSlash(rel)
 		header.Method = zip.Deflate
 
 		writer, err := archive.CreateHeader(header)

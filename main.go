@@ -35,7 +35,7 @@ var (
 )
 
 const (
-	maxWorkers   = 100
+	maxWorkers   = 150
 	jobQueueSize = 1000
 )
 
