@@ -1,8 +1,0 @@
-Jadi bot ku ini sudah sangat canggih, dari logika curcuite breker, deteksi type kontent rotasi UA, sekarang kamu cek                │
- │   internal/api/douyin ini adalah code yang baru ku tambahkan, dan perlu di sesuikan, pertama kita perlu perbahrui, menambah           │
- │   UniversalData result nya, lihat tiktok dan instagram, menambah ID dengan generate random ID lihat instagram, menentuka domain       │
- │   pada internal/config/domain.go, menentukan fiture on of pada commands pada file commands_router.go dan features_command.go          │
- │   membuat file douyin.go pada folder commnads logika nya sama seperti tiktok, karna di douyin ini ada ada audio atau music jadi       │
- │   kita hanya vidio, foto, album judul dan deskripsi, cover , juga ingat hapus pesan loading ketika file sudah di kirim seperti        │
- │   instagram dan tiktok, juga kita perlu menambah pada main.go dan guest_mood.go juga, handle_group.go juga, menambah db juga , wow    │
- │   sangat banyak perubahan 
