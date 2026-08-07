@@ -41,6 +41,7 @@ Saya adalah <b>Kometika Bot</b>. Saya siap membantu Anda mengunduh media dari be
 
 🌐 <b>Platform yang Didukung:</b>
 • TikTok
+• Douyin
 • Instagram
 • Facebook
 • Terabox
@@ -49,16 +50,17 @@ Saya adalah <b>Kometika Bot</b>. Saya siap membantu Anda mengunduh media dari be
 
 📌 <b>Cara Penggunaan:</b>
 • <i>Chat Privat:</i> Cukup kirim URL-nya secara langsung.
-• <i>Grup / Forum:</i> Gunakan perintah diikuti URL.
+• <i>Grup / Forum:</i> Gunakan perintah /dl diikuti URL.
   Format: <code>.dl [URL]</code>  (untuk video)
-  Format: <code>.play [URL YouTube]</code>
+  Format: <code>.music [URL YouTube]</code>
+	Hanya untuk Download Reels/vidio/foto.
 
 ⚡ <b>Prefix yang Tersedia:</b>
 <code>.</code> <code>!</code> <code>/</code>
 
 💡 <b>Contoh:</b>
-<code>.dl https://vm.tiktok.com/lengserkanprabowo 
-<code>.play https://youtu.be/abcdef</code>`,
+<code>.dl https://www.tiktok.com/@littlemushroom38/photo/7642995893590953224</code>
+<code>.music https://youtu.be/U8aqoTPsw3Y</code>`,
 		fullName,
 	)
 

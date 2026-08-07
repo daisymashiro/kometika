@@ -137,6 +137,17 @@ func handleAutoDownload(ctx context.Context, text string, tgClient *tg.Client, m
 				)
 			}
 		})
+	case config.IsPlatformURL(text, "douyin"):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleDouyin(bgCtx, tgClient, msg, entities, text, logger); err != nil {
+				logger.Error("Auto Douyin error", zap.Error(err))
+				log.LogError(bgCtx, "HandleDouyin", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
 	case config.IsPlatformURL(text, "lulustream"):
 		enqueueJob(func() {
 			bgCtx := context.Background()

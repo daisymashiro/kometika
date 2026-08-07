@@ -51,6 +51,8 @@ func normalizeFeatureName(f string) string {
 		return "lulustream"
 	case "tera":
 		return "terabox"
+	case "dy":
+		return "douyin"
 	}
 	return f
 }
@@ -67,7 +69,7 @@ func HandleFeaturesCommand(ctx context.Context, client *tg.Client, msg *tg.Messa
 	var sb strings.Builder
 	sb.WriteString("<b>📋 Status Fitur Downloader</b>\n\n")
 
-	featureList := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
+	featureList := []string{"tiktok", "instagram", "facebook", "twitter", "douyin", "terabox", "mediafire", "aceimg", "lulustream"}
 	for _, feature := range featureList {
 		statusIcon := "❌ Nonaktif"
 		if fm.IsEnabled(feature) {
@@ -103,7 +105,7 @@ func HandleFeatureOnCommand(ctx context.Context, client *tg.Client, msg *tg.Mess
 	feature := normalizeFeatureName(args[0])
 	fm := config.GetFeatureManager()
 
-	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
+	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "douyin", "terabox", "mediafire", "aceimg", "lulustream"}
 	if !slices.Contains(validFeatures, feature) {
 		_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("❌ Fitur <b>%s</b> tidak ditemukan.\nFitur yang tersedia: <code>%s</code>", feature, strings.Join(validFeatures, ", "))))
 		return nil
@@ -130,7 +132,7 @@ func HandleFeatureOffCommand(ctx context.Context, client *tg.Client, msg *tg.Mes
 	feature := normalizeFeatureName(args[0])
 	fm := config.GetFeatureManager()
 
-	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "terabox", "mediafire", "aceimg", "lulustream"}
+	validFeatures := []string{"tiktok", "instagram", "facebook", "twitter", "douyin", "terabox", "mediafire", "aceimg", "lulustream"}
 	if !slices.Contains(validFeatures, feature) {
 		_, _ = msgSender.StyledText(ctx, htmlparser.String(nil, fmt.Sprintf("❌ Fitur <b>%s</b> tidak ditemukan.\nFitur yang tersedia: <code>%s</code>", feature, strings.Join(validFeatures, ", "))))
 		return nil

@@ -69,6 +69,18 @@ var platforms = []PlatformDomain{
 		},
 	},
 	{
+		Name: "douyin",
+		Domains: []string{
+			"douyin.com",
+			"v.douyin.com",
+			"iesdouyin.com",
+			// Domain yang benar-benar ditangani scraper (RedNote/Xiaohongshu)
+			"xiaohongshu.com",
+			"xhslink.com",
+			"rednote.com",
+		},
+	},
+	{
 		Name: "twitter",
 		Domains: []string{
 			"twitter.com",

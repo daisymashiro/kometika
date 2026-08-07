@@ -192,6 +192,8 @@ func HandleGroupDL(ctx context.Context, client *tg.Client, msg *tg.Message, enti
 		return HandleLulustream(ctx, client, msg, entities, url, logger)
 	case config.IsPlatformURL(url, "facebook"):
 		return HandleFacebook(ctx, client, msg, entities, url, logger)
+	case config.IsPlatformURL(url, "douyin"):
+		return HandleDouyin(ctx, client, msg, entities, url, logger)
 	case config.IsPlatformURL(url, "mediafire"):
 		return HandleMediaFire(ctx, client, msg, entities, url, logger)
 	case config.IsPlatformURL(url, "aceimg"):
@@ -199,7 +201,7 @@ func HandleGroupDL(ctx context.Context, client *tg.Client, msg *tg.Message, enti
 	case config.IsPlatformURL(url, "twitter"):
 		return HandleTwitter(ctx, client, msg, entities, url, logger)
 	default:
-		if err := sendGroupText(ctx, client, peer, "❌ URL tidak dikenali. Platform yang didukung:\n• TikTok\n• Instagram\n• Facebook\n• Twitter\n• Lulustream\n• Terabox\n• MediaFire\n• AceImg", replyTo); err != nil {
+		if err := sendGroupText(ctx, client, peer, "❌ URL tidak dikenali. Platform yang didukung:\n• TikTok\n• Instagram\n• Facebook\n• Douyin\n• Twitter\n• Lulustream\n• Terabox\n• MediaFire\n• AceImg", replyTo); err != nil {
 			logger.Error("Gagal kirim pesan error", zap.Error(err))
 		}
 		return fmt.Errorf("unsupported URL: %s", url)

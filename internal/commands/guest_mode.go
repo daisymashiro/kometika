@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"mybot/internal/api"
+	"mybot/internal/api/douyin"
 	"mybot/internal/api/facebook"
 	"mybot/internal/api/instagram"
 	"mybot/internal/api/tiktok"
@@ -131,6 +132,13 @@ func processGuestTask(ctx context.Context, client *tg.Client, inlineMsgID tg.Inp
 		}
 		err = processGuestFacebook(ctx, client, inlineMsgID, url, logger)
 
+	case config.IsPlatformURL(url, "douyin"):
+		if !fm.IsEnabled("douyin") {
+			editGuestInlineText(ctx, client, inlineMsgID, "  Fitur Douyin sedang dinonaktifkan.")
+			return
+		}
+		err = processGuestDouyin(ctx, client, inlineMsgID, url, logger)
+
 	case config.IsPlatformURL(url, "twitter"):
 		if !fm.IsEnabled("twitter") {
 			editGuestInlineText(ctx, client, inlineMsgID, "  Fitur Twitter (X) sedang dinonaktifkan.")
@@ -139,7 +147,7 @@ func processGuestTask(ctx context.Context, client *tg.Client, inlineMsgID tg.Inp
 		err = processGuestTwitter(ctx, client, inlineMsgID, url, logger)
 
 	default:
-		editGuestInlineText(ctx, client, inlineMsgID, "  Platform tidak didukung. \n\nSaat ini hanya mendukung Tiktok, Facebook, Instagram, dan Twitter (X).")
+		editGuestInlineText(ctx, client, inlineMsgID, "  Platform tidak didukung. \n\nSaat ini hanya mendukung Tiktok, Facebook, Instagram, Douyin, dan Twitter (X).")
 		log.LogWarn(ctx, "GuestUnsupported", "Platform tidak didukung", "url="+url)
 		return
 	}
@@ -219,6 +227,64 @@ func processGuestInstagram(ctx context.Context, client *tg.Client, inlineMsgID t
 		caption := fmt.Sprintf("%s\n\n@Kometika_bot", data.Title)
 		if len(caption) > 400 {
 			caption = caption[:400]
+		}
+		inputMedia := &tg.InputMediaDocument{
+			ID: &tg.InputDocument{
+				ID:            fileID,
+				AccessHash:    accessHash,
+				FileReference: fileRef,
+			},
+		}
+		return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
+	}
+	if len(data.ImageURLs) == 1 {
+		imgURL := data.ImageURLs[0]
+		editGuestInlineText(ctx, client, inlineMsgID, "📥 Mengunduh foto...")
+		fileID, accessHash, fileRef, err := uploadImageToCacheWithRetry(ctx, client, imgURL, 3)
+		if err != nil {
+			return err
+		}
+		caption := fmt.Sprintf("%s\n\n@Kometika_bot", data.Title)
+		if len(caption) > 200 {
+			caption = caption[:200]
+		}
+		inputMedia := &tg.InputMediaPhoto{
+			ID: &tg.InputPhoto{
+				ID:            fileID,
+				AccessHash:    accessHash,
+				FileReference: fileRef,
+			},
+		}
+		return editGuestInlineMedia(ctx, client, inlineMsgID, inputMedia, caption)
+	}
+	return fmt.Errorf("tidak ada media")
+}
+
+func processGuestDouyin(ctx context.Context, client *tg.Client, inlineMsgID tg.InputBotInlineMessageIDClass, url string, logger *zap.Logger) error {
+	editGuestInlineText(ctx, client, inlineMsgID, "🔍 Mendeteksi Douyin...")
+	data, err := douyin.FetchDouyinData(ctx, url)
+	if err != nil {
+		return err
+	}
+	if data.IsAlbum {
+		editGuestInlineText(ctx, client, inlineMsgID, "❌ Album tidak didukung di Guest Mode.")
+		return nil
+	}
+	if data.VideoURL != "" {
+		editGuestInlineText(ctx, client, inlineMsgID, "📥 Mengunduh video...")
+		info := api.ContentTypeInfo{
+			MimeType:  "video/mp4",
+			Category:  api.ContentVideo,
+			Extension: ".mp4",
+		}
+		filename := fmt.Sprintf("%s.mp4", data.ID)
+		fileID, accessHash, fileRef, err := uploadMediaToCacheWithRetry(ctx, client, data.VideoURL, info, filename, data.CoverURL, 3)
+		if err != nil {
+			return err
+		}
+		caption := fmt.Sprintf("%s\n\n@Kometika_bot", data.Title)
+		if len(caption) > 200 {
+			caption = caption[:200]
 		}
 		inputMedia := &tg.InputMediaDocument{
 			ID: &tg.InputDocument{

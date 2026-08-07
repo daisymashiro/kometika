@@ -32,11 +32,12 @@ func HandleHelpCommand(ctx context.Context, client *tg.Client, msg *tg.Message, 
 
 <b>🚀 Fitur & Platform yang Didukung:</b>
 • <b>TikTok</b> (Video, Album Foto, Audio)
+• <b>Douyin / RedNote</b> (Video, Foto, Album)
 • <b>Instagram</b> (Reels, Post, IGTV, Album)
 • <b>Facebook</b> (Video/Reels)
 • <b>Twitter / X</b> (Video, Foto, Album)
 • <b>Terabox</b> (Download Video/File)
-• <b>YouTube</b> (Unduh Musik dengan perintah <code>play</code>)
+• <b>YouTube</b> (Unduh Musik dengan perintah <code>music</code>)
 • <b>LuluStream, MediaFire, AceImg</b>
 
 <b>⌨️ Pemanggilan Perintah:</b>
