@@ -245,67 +245,36 @@ func teraboxGetInfoRaw(client *http.Client, surl string, path string) (string, e
 	return string(body), nil
 }
 
-func teraboxGetLocatedDownloads(client *http.Client, dlink string) ([]string, error) {
-	randStr, t := teraboxGenerateRand()
-	parsedURL, err := url.Parse(dlink)
+// teraboxResolveDlink menembak dlink mentah dan menangkap redirect 302 ke server CDN asli.
+func teraboxResolveDlink(client *http.Client, dlink string) (string, error) {
+	req, err := http.NewRequest("GET", dlink, nil)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	originalQuery := parsedURL.Query()
-	pathParts := strings.Split(parsedURL.Path, "/")
-	lastPath := pathParts[len(pathParts)-1]
-	reqURL, _ := url.Parse("https://dm.terabox.com/rest/2.0/pcs/file")
-	q := reqURL.Query()
-	q.Add("app_id", "25028")
-	q.Add("method", "locatedownload")
-	q.Add("path", lastPath)
-	q.Add("clienttype", "8")
-	q.Add("devuid", teraboxDEVUID)
-	q.Add("rand", randStr)
-	q.Add("time", t)
-	for k, v := range originalQuery {
-		if len(v) > 0 {
-			q.Add(k, v[0])
-		}
-	}
-	reqURL.RawQuery = q.Encode()
-	req, _ := http.NewRequest("POST", reqURL.String(), nil)
 	req.Header.Set("User-Agent", teraboxUSER_AGENT)
 	req.AddCookie(&http.Cookie{Name: "ndus", Value: teraboxNDUSValue()})
-	res, err := client.Do(req)
+
+	// Buat client copy yang dilarang follow redirect (supaya kita bisa tangkap Location)
+	clientCopy := *client
+	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	res, err := clientCopy.Do(req)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer res.Body.Close()
-	body, _ := io.ReadAll(res.Body)
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	var urls []string
-	if urlsArray, ok := result["urls"].([]interface{}); ok {
-		for _, u := range urlsArray {
-			if uMap, ok := u.(map[string]interface{}); ok {
-				if urlStr, ok := uMap["url"].(string); ok {
-					urls = append(urls, urlStr)
-				}
-			}
+	// Kalau Terabox merespon 302, ambil URL asli dari header Location
+	if res.StatusCode == 302 || res.StatusCode == 301 {
+		location := res.Header.Get("Location")
+		if location != "" {
+			return location, nil
 		}
 	}
-	if bakUrls, ok := result["oversea_bakurls"].([]interface{}); ok {
-		for _, u := range bakUrls {
-			if uMap, ok := u.(map[string]interface{}); ok {
-				if urlStr, ok := uMap["url"].(string); ok {
-					urls = append(urls, urlStr)
-				}
-			}
-		}
-	}
-	if len(urls) == 0 {
-		return nil, fmt.Errorf("no download URLs found")
-	}
-	return urls, nil
+
+	return "", fmt.Errorf("gagal resolve dlink, status: %d", res.StatusCode)
 }
 
 // teraboxListRaw ambil daftar item (file + folder) dari satu folder share.
@@ -515,9 +484,11 @@ func teraboxEnrichFiles(client *http.Client, teraboxURL string, files []teraboxF
 				// Kandidat URL untuk stream, maksimal 2: located dlink lalu dlink raw.
 				var candidates []string
 				if file.Dlink != "" {
-					if links, err := teraboxGetLocatedDownloads(client, file.Dlink); err == nil && len(links) > 0 {
-						candidates = append(candidates, links[0])
+					// PAKAI teraboxResolveDlink, HAPUS teraboxGetLocatedDownloads
+					if resolved, err := teraboxResolveDlink(client, file.Dlink); err == nil && resolved != "" {
+						candidates = append(candidates, resolved)
 					}
+					// Fallback kalau gagal resolve, pakai dlink mentah
 					candidates = append(candidates, file.Dlink)
 				}
 

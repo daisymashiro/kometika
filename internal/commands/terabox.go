@@ -17,6 +17,7 @@ import (
 
 	"mybot/internal/api"
 	"mybot/internal/api/terabox"
+	"mybot/internal/assets"
 	"mybot/internal/config"
 	"mybot/internal/media"
 
@@ -78,14 +79,12 @@ func getExt(filename string) string {
 
 func sanitizeFileName(name string) string {
 	base := filepath.Base(name)
-	// ganti separator/path dan karakter berbahaya
 	base = strings.ReplaceAll(base, "/", "_")
 	base = strings.ReplaceAll(base, "\\", "_")
 	forbidden := []string{":", "*", "?", "\"", "<", ">", "|"}
 	for _, ch := range forbidden {
 		base = strings.ReplaceAll(base, ch, "_")
 	}
-	// hilangkan control chars
 	cleaned := make([]rune, 0, len(base))
 	for _, r := range base {
 		if r >= 32 && r != 127 {
@@ -132,7 +131,6 @@ func parseFileSizeToBytes(sizeStr string) int64 {
 	case "GB":
 		return int64(value * GB)
 	default:
-		// no unit -> interpret as bytes
 		return int64(value)
 	}
 }
@@ -145,10 +143,11 @@ func getTeraboxStream(ctx context.Context, dlURL string) (io.ReadCloser, error) 
 	}
 	req.Header.Set("User-Agent", "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox")
 	req.Header.Set("Accept", "*/*")
-	// referer kadang dibutuhkan oleh CDN
-	req.Header.Set("Referer", "https://www.terabox.com/")
+	req.Header.Set("Accept-Encoding", "identity")
 
-	if strings.Contains(dlURL, "terabox.com") {
+	// Cek domain freeterabox.com (CDN Asli) atau terabox.com
+	if strings.Contains(dlURL, "terabox.com") || strings.Contains(dlURL, "freeterabox.com") {
+		req.Header.Set("Referer", "https://www.terabox.com/")
 		ndus := os.Getenv("TERABOX_NDUS")
 		if ndus == "" {
 			ndus = "YVpRgB8peHuioBg2od16nL6d818WSLZg1nbJ8Tuv"
@@ -171,10 +170,7 @@ func getTeraboxStream(ctx context.Context, dlURL string) (io.ReadCloser, error) 
 
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
-		// beberapa server tidak memberikan content-type, izinkan tapi hati-hati
 	} else if strings.HasPrefix(strings.ToLower(ct), "text/") || strings.Contains(strings.ToLower(ct), "html") {
-		// kemungkinan redirect ke halaman HTML (interstitial / captcha), anggap gagal
-		// baca sedikit body untuk log/debug
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("unexpected content-type: %s", ct)
 	}
@@ -305,20 +301,33 @@ func fetchAndShowTerabox(ctx context.Context, client *tg.Client, peer tg.InputPe
 		}
 		tbMutex.Unlock()
 
-		time.AfterFunc(5*time.Minute+30*time.Second, func() {
-			tbMutex.Lock()
+		// Tombol (menu/action) dihapus otomatis setelah 30 menit.
+		// Baca state terbaru dari cache supaya ActionMsgID (bisa di-set belakangan) ikut terhapus.
+		time.AfterFunc(30*time.Minute, func() {
+			tbMutex.RLock()
 			sess, exists := teraboxCache[reqID]
+			tbMutex.RUnlock()
+			if !exists {
+				return
+			}
+			ctxBg := context.Background()
+			if sess.MenuMsgID != 0 {
+				deleteGroupMessage(ctxBg, client, sess.Peer, sess.MenuMsgID)
+			}
+			if sess.ActionMsgID != 0 {
+				deleteGroupMessage(ctxBg, client, sess.Peer, sess.ActionMsgID)
+			}
+			zap.L().Info("Tombol menu/action Terabox dihapus otomatis (30 menit)", zap.String("reqID", reqID))
+		})
+
+		// Cache disimpan 10 jam supaya callback tetap valid selama itu.
+		time.AfterFunc(10*time.Hour, func() {
+			tbMutex.Lock()
+			_, exists := teraboxCache[reqID]
 			delete(teraboxCache, reqID)
 			tbMutex.Unlock()
-
 			if exists {
-				if sess.MenuMsgID != 0 {
-					deleteGroupMessage(context.Background(), client, sess.Peer, sess.MenuMsgID)
-				}
-				if sess.ActionMsgID != 0 {
-					deleteGroupMessage(context.Background(), client, sess.Peer, sess.ActionMsgID)
-				}
-				zap.L().Info("Pesan menu/action Terabox dihapus otomatis", zap.String("reqID", reqID))
+				zap.L().Info("Cache Terabox dihapus otomatis (10 jam)", zap.String("reqID", reqID))
 			}
 		})
 	}
@@ -508,6 +517,16 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 			return nil
 		}
 
+		// Hitung total ukuran dari metadata SEBELUM unduh ke server.
+		// Kalau > 1.9 GB, ZIP dibatalkan (boros bandwidth & penyimpanan),
+		// user tetap bisa unduh/stream per file lewat menu yang masih terbuka.
+		if totalSize := sumFileSizes(sess.Files); totalSize > zipBatchMaxSize {
+			msg := fmt.Sprintf("⚠️ <b>Total ukuran terlalu besar untuk ZIP.</b>\n\n📦 Total: %s\n🚫 Batas ZIP: 1.9 GB\n\nPilih file satu per satu lewat menu di bawah untuk unduh/stream.", terabox.FormatBytes(totalSize))
+			_ = media.SendHTML(ctx, client, peer, msg)
+			media.AnswerCallback(ctx, client, update.QueryID, "Terlalu besar untuk ZIP, pilih per file", false)
+			return nil
+		}
+
 		media.AnswerCallback(ctx, client, update.QueryID, "Memproses unduhan paralel & ZIP...", false)
 
 		tbMutex.Lock()
@@ -621,9 +640,10 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 	if action == "down" {
 		media.AnswerCallback(ctx, client, update.QueryID, "", false)
 
-		downloadURL := fileTarget.StreamURL
+		// PERBAIKAN: Gunakan DownloadURL (Direct CDN) untuk diunduh oleh bot, jangan lewat CF Worker!
+		downloadURL := fileTarget.DownloadURL
 		if downloadURL == "" {
-			downloadURL = fileTarget.DownloadURL
+			downloadURL = fileTarget.StreamURL
 		}
 
 		if downloadURL == "" {
@@ -631,8 +651,17 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 			return nil
 		}
 
+		// Kirim pesan loading supaya user tahu unduhan sudah dimulai.
+		// Dihapus otomatis setelah file terkirim, atau juga kalau gagal (defer).
+		loadingMsgID, _ := sendLoadingMessage(ctx, client, peer, "📥 Mengunduh file, mohon tunggu...", nil, logger)
+		defer func() {
+			if loadingMsgID != 0 {
+				go deleteLoadingMessage(client, peer, loadingMsgID, logger)
+			}
+		}()
+
 		sizeBytes := parseFileSizeToBytes(fileTarget.FileSize)
-		const maxSize = 400 * 1024 * 1024 // 400 MB
+		const maxSize = 800 * 1024 * 1024 // 800 MB
 
 		if sizeBytes < maxSize {
 			logger.Info("Mulai mengunduh file single", zap.String("filename", fileTarget.FileName), zap.String("url", downloadURL))
@@ -664,6 +693,15 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 
 			captionPlain := fmt.Sprintf("📄 %s\n\n@Kometika_bot", fileTarget.FileName)
 			mediaSender := media.NewMediaSender(client)
+
+			// PERBAIKAN: Kalau file video dan thumbnail custom tidak ada/gagal
+			// diunduh, pakai thumbnail default embedded supaya tetap ada preview.
+			if info.Category == api.ContentVideo && thumbFile == nil {
+				if t, uErr := mediaSender.UploadThumbnail(ctx, assets.DefaultThumbnail); uErr == nil && t != nil {
+					thumbFile = t
+				}
+			}
+
 			_, err = mediaSender.SendDynamicStream(
 				ctx, peer, fullStream, info, fileTarget.FileName, captionPlain, nil, nil, thumbFile,
 			)
@@ -674,9 +712,10 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 				logger.Info("File single berhasil dikirim ke Telegram", zap.String("filename", fileTarget.FileName))
 			}
 		} else {
-			shortURL, err := api.ShortenWithFallback(downloadURL)
+			// Jika > 400MB, berikan tombol link StreamURL (CF Worker) ke user
+			shortURL, err := api.ShortenWithFallback(fileTarget.StreamURL)
 			if err != nil {
-				shortURL = downloadURL
+				shortURL = fileTarget.StreamURL
 			}
 			htmlMsg := fmt.Sprintf("📄 %s\n\n⚖️ Ukuran: %s\n\n@Kometika_bot", fileTarget.FileName, fileTarget.FileSize)
 			downMarkup := markup.InlineKeyboard(markup.Row(markup.URL("⬇️ Unduh File", shortURL, markup.StyleBgSuccess())))
@@ -715,9 +754,10 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 	var mu sync.Mutex
 
 	for i, f := range files {
-		targetURL := f.StreamURL
+		// PERBAIKAN: Gunakan DownloadURL (Direct CDN), jangan StreamURL!
+		targetURL := f.DownloadURL
 		if targetURL == "" {
-			targetURL = f.DownloadURL
+			targetURL = f.StreamURL
 		}
 
 		if targetURL == "" {
@@ -735,11 +775,9 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 
 			logger.Info("Mulai mengunduh file", zap.String("filename", file.FileName), zap.Int("index", index+1))
 
-			// Buat nama file yang aman dan unik
 			safe := sanitizeFileName(file.FileName)
 			destPath := filepath.Join(tmpDir, fmt.Sprintf("%03d_%s", index+1, safe))
 
-			// Coba beberapa kali sebelum dianggap gagal
 			var err error
 			maxAttempts := 3
 			for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -749,7 +787,6 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 					break
 				}
 				logger.Warn("Gagal mengunduh, akan retry", zap.String("filename", file.FileName), zap.Int("attempt", attempt), zap.Error(err))
-				// backoff sederhana
 				time.Sleep(time.Duration(attempt*2) * time.Second)
 			}
 
@@ -822,6 +859,21 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 	_ = deleteGroupMessage(ctx, client, peer, menuMsgID)
 }
 
+// zipBatchMaxSize = 1.9 GB (2.040.109.465 byte), batas aman di bawah limit
+// 2 GB Telegram. Kalau total ukuran batch melebihi ini, ZIP dibatalkan dan
+// user dialihkan ke unduh per-file lewat menu.
+const zipBatchMaxSize int64 = 2040109465
+
+// sumFileSizes menjumlahkan ukuran file dari metadata (FileSize string),
+// tanpa perlu mengunduh file ke server dulu.
+func sumFileSizes(files []terabox.TeraboxUniversalData) int64 {
+	var total int64
+	for _, f := range files {
+		total += parseFileSizeToBytes(f.FileSize)
+	}
+	return total
+}
+
 func downloadFileToPath(ctx context.Context, url string, dest string) error {
 	stream, err := getTeraboxStream(ctx, url)
 	if err != nil {
@@ -829,7 +881,6 @@ func downloadFileToPath(ctx context.Context, url string, dest string) error {
 	}
 	defer stream.Close()
 
-	// pastikan direktori ada
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -841,7 +892,6 @@ func downloadFileToPath(ctx context.Context, url string, dest string) error {
 	}
 	defer func() {
 		out.Close()
-		// jika gagal dan file tmp ada, hapus
 	}()
 
 	if _, err := io.Copy(out, stream); err != nil {
@@ -850,7 +900,6 @@ func downloadFileToPath(ctx context.Context, url string, dest string) error {
 		return err
 	}
 	out.Close()
-	// pindah ke destinasi final
 	if err := os.Rename(tmp, dest); err != nil {
 		_ = os.Remove(tmp)
 		return err
@@ -885,7 +934,6 @@ func createZipFromDir(sourceDir, zipFilePath string) error {
 		if err != nil {
 			return err
 		}
-		// zip format expects forward slashes
 		header.Name = filepath.ToSlash(rel)
 		header.Method = zip.Deflate
 
