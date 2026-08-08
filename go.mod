@@ -90,4 +90,4 @@ require (
 	rsc.io/qr v0.2.0 // indirect
 )
 
-replace droplink v0.0.0 => /home/daisy/mayumi/Experimen/golang/scraper/droplink
+replace droplink => ./third_party/droplink
