@@ -17,6 +17,14 @@ require (
 )
 
 require (
+	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
+	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
+	github.com/go-stack/stack v1.8.1 // indirect
+	github.com/mxschmitt/playwright-go v0.6100.0 // indirect
+)
+
+require (
+	droplink v0.0.0
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/bitly/go-simplejson v0.5.1 // indirect
@@ -81,3 +89,5 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )
+
+replace droplink v0.0.0 => /home/daisy/mayumi/Experimen/golang/scraper/droplink

@@ -279,7 +279,7 @@ func sendInstagramVideo(
 		logger.Info("Audio Instagram disimpan ke cache", zap.String("video_id", videoID))
 	}
 
-	stream, _, err := api.GetVideoStream(ctx, videoURL)
+	stream, err := api.GetVideoStreamWithProxyFallback(ctx, videoURL)
 	if err != nil {
 		return fmt.Errorf("gagal buka stream video Instagram: %w", err)
 	}
@@ -344,7 +344,7 @@ func detectInstagramContentWithFallback(
 		"error="+err.Error(),
 	)
 
-	stream2, _, err2 := api.GetVideoStream(ctx, videoURL)
+	stream2, err2 := api.GetVideoStreamWithProxyFallback(ctx, videoURL)
 	if err2 != nil {
 		return api.ContentTypeInfo{}, nil, nil, fmt.Errorf("gagal fetch ulang video setelah gagal deteksi: %w", err2)
 	}

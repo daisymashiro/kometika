@@ -135,47 +135,107 @@ func parseFileSizeToBytes(sizeStr string) int64 {
 	}
 }
 
-// getTeraboxStream adalah custom HTTP downloader khusus untuk mem-bypass pemblokiran CDN Terabox
-func getTeraboxStream(ctx context.Context, dlURL string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", dlURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Encoding", "identity")
+// getTeraboxStream adalah custom HTTP downloader khusus untuk mem-bypass pemblokiran CDN Terabox.
+// Unduh lewat proxy acak dari cache; kalau proxy gagal, retry dengan proxy
+// lain (maks maxDownloadAttempts). Kalau daftar proxy kosong, fallback langsung.
+// wantBytes > 0: ukuran Content-Length diverifikasi — mencegah proxy MITM
+// menyuntikkan file palsu ukuran berbeda.
+func getTeraboxStream(ctx context.Context, dlURL string, wantBytes int64) (io.ReadCloser, error) {
+	const maxDownloadAttempts = 3
 
-	// Cek domain freeterabox.com (CDN Asli) atau terabox.com
-	if strings.Contains(dlURL, "terabox.com") || strings.Contains(dlURL, "freeterabox.com") {
-		req.Header.Set("Referer", "https://www.terabox.com/")
-		ndus := os.Getenv("TERABOX_NDUS")
-		if ndus == "" {
-			ndus = "YVpRgB8peHuioBg2od16nL6d818WSLZg1nbJ8Tuv"
+	// Header sama untuk semua percobaan.
+	buildReq := func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "GET", dlURL, nil)
+		if err != nil {
+			return nil, err
 		}
-		req.AddCookie(&http.Cookie{Name: "ndus", Value: ndus})
+		req.Header.Set("User-Agent", "terabox;1.34.0.4;PC;PC-Windows;10.0.19045;WindowsTeraBox")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Encoding", "identity")
+
+		// Cek domain freeterabox.com (CDN Asli) atau terabox.com
+		if strings.Contains(dlURL, "terabox.com") || strings.Contains(dlURL, "freeterabox.com") {
+			req.Header.Set("Referer", "https://www.terabox.com/")
+			ndus := os.Getenv("TERABOX_NDUS")
+			if ndus == "" {
+				ndus = "YVpRgB8peHuioBg2od16nL6d818WSLZg1nbJ8Tuv"
+			}
+			req.AddCookie(&http.Cookie{Name: "ndus", Value: ndus})
+		}
+		return req, nil
 	}
 
-	client := &http.Client{
-		Timeout: 2 * time.Hour,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+	// Coba beberapa proxy berbeda; proxy yang sudah dipakai tidak dipakai lagi
+	// dalam satu unduhan.
+	used := map[string]bool{}
+	var lastErr error
+
+	for attempt := 0; attempt < maxDownloadAttempts; attempt++ {
+		req, err := buildReq()
+		if err != nil {
+			return nil, err
+		}
+
+		client := &http.Client{Timeout: 2 * time.Hour}
+
+		if proxy, perr := api.GetRandomProxy(ctx); perr == nil && !used[proxy.Addr] {
+			used[proxy.Addr] = true
+			if pclient, cerr := api.NewHTTPClientViaProxy(proxy, 2*time.Hour); cerr == nil {
+				client = pclient
+				zap.L().Info("Terabox download via proxy",
+					zap.String("proxy", proxy.Addr),
+					zap.String("type", proxy.Type))
+			} else {
+				zap.L().Warn("Gagal buat client proxy", zap.String("proxy", proxy.Addr), zap.Error(cerr))
+			}
+		} else if perr != nil {
+			zap.L().Warn("Terabox download tanpa proxy (gagal ambil daftar proxy)", zap.Error(perr))
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			zap.L().Warn("Percobaan download Terabox gagal",
+				zap.Int("attempt", attempt+1),
+				zap.Error(err))
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			lastErr = fmt.Errorf("status HTTP %d", resp.StatusCode)
+			zap.L().Warn("Percobaan download Terabox dapat status salah",
+				zap.Int("attempt", attempt+1),
+				zap.Int("status", resp.StatusCode))
+			resp.Body.Close()
+			continue
+		}
+
+		// Verifikasi ukuran: proxy MITM yang menyuntikkan file palsu hampir
+		// selalu beda panjang. Hanya cek saat keduanya diketahui.
+		if wantBytes > 0 && resp.ContentLength >= 0 && resp.ContentLength != wantBytes {
+			lastErr = fmt.Errorf("ukuran file tidak cocok: dapat %d, harap %d", resp.ContentLength, wantBytes)
+			zap.L().Warn("Percobaan download Terabox: ukuran dianggap palsu (kemungkinan proxy MITM)",
+				zap.Int("attempt", attempt+1),
+				zap.Int64("got", resp.ContentLength),
+				zap.Int64("want", wantBytes))
+			resp.Body.Close()
+			continue
+		}
+
+		ct := resp.Header.Get("Content-Type")
+		if ct != "" && (strings.HasPrefix(strings.ToLower(ct), "text/") || strings.Contains(strings.ToLower(ct), "html")) {
+			lastErr = fmt.Errorf("unexpected content-type: %s", ct)
+			zap.L().Warn("Percobaan download Terabox dapat konten salah",
+				zap.Int("attempt", attempt+1),
+				zap.String("content_type", ct))
+			resp.Body.Close()
+			continue
+		}
+
+		return resp.Body, nil
 	}
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		resp.Body.Close()
-		return nil, fmt.Errorf("status HTTP %d", resp.StatusCode)
-	}
-
-	ct := resp.Header.Get("Content-Type")
-	if ct == "" {
-	} else if strings.HasPrefix(strings.ToLower(ct), "text/") || strings.Contains(strings.ToLower(ct), "html") {
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("unexpected content-type: %s", ct)
-	}
-
-	return resp.Body, nil
+	return nil, lastErr
 }
 
 // --- Entry point ---
@@ -665,7 +725,7 @@ func HandleTeraboxCallback(ctx context.Context, client *tg.Client, peer tg.Input
 
 		if sizeBytes < maxSize {
 			logger.Info("Mulai mengunduh file single", zap.String("filename", fileTarget.FileName), zap.String("url", downloadURL))
-			stream, err := getTeraboxStream(ctx, downloadURL)
+			stream, err := getTeraboxStream(ctx, downloadURL, sizeBytes)
 			if err != nil {
 				logger.Error("Gagal stream file Terabox", zap.Error(err), zap.String("url", downloadURL))
 				_ = media.SendHTML(ctx, client, peer, "❌ Gagal mengambil stream file.")
@@ -778,10 +838,12 @@ func processZipDownload(client *tg.Client, peer tg.InputPeerClass, files []terab
 			safe := sanitizeFileName(file.FileName)
 			destPath := filepath.Join(tmpDir, fmt.Sprintf("%03d_%s", index+1, safe))
 
+			// Verifikasi ukuran tiap file terhadap metadata (anti proxy MITM).
+			wantBytes := parseFileSizeToBytes(file.FileSize)
 			var err error
 			maxAttempts := 3
 			for attempt := 1; attempt <= maxAttempts; attempt++ {
-				err = downloadFileToPath(ctx, dlUrl, destPath)
+				err = downloadFileToPath(ctx, dlUrl, destPath, wantBytes)
 				if err == nil {
 					logger.Info("Selesai mengunduh file", zap.String("filename", file.FileName))
 					break
@@ -874,8 +936,8 @@ func sumFileSizes(files []terabox.TeraboxUniversalData) int64 {
 	return total
 }
 
-func downloadFileToPath(ctx context.Context, url string, dest string) error {
-	stream, err := getTeraboxStream(ctx, url)
+func downloadFileToPath(ctx context.Context, url string, dest string, wantBytes int64) error {
+	stream, err := getTeraboxStream(ctx, url, wantBytes)
 	if err != nil {
 		return err
 	}

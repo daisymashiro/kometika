@@ -149,6 +149,11 @@ func IsTeraboxLink(url string) bool {
 	return IsPlatformURL(url, "terabox")
 }
 
+// IsDroplinkLink mengecek apakah URL adalah link droplink.co
+func IsDroplinkLink(url string) bool {
+	return checkDomainMatch(url, "droplink.co")
+}
+
 // GetAllPlatforms mengembalikan daftar semua nama platform
 func GetAllPlatforms() []string {
 	names := make([]string, len(platforms))

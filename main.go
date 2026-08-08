@@ -40,10 +40,7 @@ const (
 )
 
 func initLogger() {
-	file, err := os.OpenFile("mybot.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		panic(err)
-	}
+	file := newRotatingFile("mybot.log", 50<<20) // rotasi otomatis di 50MB
 	writeSyncer := zapcore.AddSync(file)
 
 	encoderCfg := zap.NewProductionEncoderConfig()
@@ -54,6 +51,51 @@ func initLogger() {
 	core := zapcore.NewCore(encoder, writeSyncer, zapcore.DebugLevel)
 	logger = zap.New(core)
 	zap.ReplaceGlobals(logger)
+}
+
+// rotatingFile membungkus *os.File dengan rotasi berbasis ukuran.
+// log lama dipindah ke "<path>.1" (yang lama dihapus), jadi hanya
+// tersisa 2 file log dan disk tidak pernah penuh oleh mybot.log.
+type rotatingFile struct {
+	*os.File
+	path string
+	max  int64
+	size int64
+}
+
+func newRotatingFile(path string, maxBytes int64) *rotatingFile {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+	if err != nil {
+		panic(err)
+	}
+	fi, err := f.Stat()
+	var size int64
+	if err == nil {
+		size = fi.Size()
+	}
+	return &rotatingFile{File: f, path: path, max: maxBytes, size: size}
+}
+
+func (r *rotatingFile) Write(p []byte) (int, error) {
+	if r.size+int64(len(p)) > r.max {
+		r.rotate()
+	}
+	n, err := r.File.Write(p)
+	r.size += int64(n)
+	return n, err
+}
+
+func (r *rotatingFile) rotate() {
+	_ = r.File.Sync()
+	_ = r.File.Close()
+	_ = os.Remove(r.path + ".1")
+	_ = os.Rename(r.path, r.path+".1")
+	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+	if err != nil {
+		panic(err)
+	}
+	r.File = f
+	r.size = 0
 }
 
 // [TAMBAH] Fungsi startWorkerPool
@@ -176,6 +218,17 @@ func handleAutoDownload(ctx context.Context, text string, tgClient *tg.Client, m
 			if err := commands.HandleTerabox(bgCtx, tgClient, msg, entities, text); err != nil {
 				logger.Error("Auto Terabox error", zap.Error(err))
 				log.LogError(bgCtx, "HandleTerabox", err,
+					fmt.Sprintf("URL: %s", text),
+					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
+				)
+			}
+		})
+	case config.IsDroplinkLink(text):
+		enqueueJob(func() {
+			bgCtx := context.Background()
+			if err := commands.HandleDroplink(bgCtx, tgClient, msg, entities, text); err != nil {
+				logger.Error("Auto Droplink error", zap.Error(err))
+				log.LogError(bgCtx, "HandleDroplink", err,
 					fmt.Sprintf("URL: %s", text),
 					fmt.Sprintf("UserID: %d", getUserIDFromMsg(msg)),
 				)
@@ -329,6 +382,8 @@ func main() {
 	defer logger.Sync()
 	db.InitDB("kometika_bot.db")
 	defer db.DB.Close()
+
+	cache.StartJanitor()
 
 	fm := config.GetFeatureManager()
 	fm.LoadFromDB()
